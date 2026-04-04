@@ -50,3 +50,7 @@
 - [x] Make mobile preview fit the viewport before falling back to scroll.
 - [x] Initialize local git, merge remote bootstrap history, and push to origin/main.
 - [ ] Verify the GitHub Pages workflow run and confirm the public preview URL.
+### Update 2026-04-05 01:33
+- [x] Diagnose GitHub Pages deploy failure from Actions log.
+- [x] Harden deploy workflow with configure-pages and explicit deploy permissions.
+- [ ] Repo owner to enable Pages -> GitHub Actions in repository settings and rerun deployment.
