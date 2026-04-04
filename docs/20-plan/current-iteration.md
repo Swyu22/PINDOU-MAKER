@@ -45,3 +45,8 @@
 - [x] 重写生成器为按格取样 + 区域加权平均色 + 后置限色
 - [x] 增加移动端预览自适配逻辑
 - [x] 全量测试与生产构建通过
+### Update 2026-04-05 01:20
+- [x] Replace smoothing-first conversion with grid-first region-weighted average sampling.
+- [x] Make mobile preview fit the viewport before falling back to scroll.
+- [x] Initialize local git, merge remote bootstrap history, and push to origin/main.
+- [ ] Verify the GitHub Pages workflow run and confirm the public preview URL.
