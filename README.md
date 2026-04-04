@@ -1,4 +1,4 @@
-# Pindou
+# PINDOU-MAKER
 
 ## 当前状态
 - 状态：V1 MVP 已实现
