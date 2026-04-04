@@ -378,4 +378,83 @@ describe('generatePattern', () => {
 
     expect(new Set(sampleCodes).size).toBeGreaterThanOrEqual(3);
   });
+
+  it('preserves a bright eye catchlight inside a dark eye cluster instead of flattening the whole eye to black', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+
+    for (let row = 0; row < 64; row += 1) {
+      for (let column = 0; column < 64; column += 1) {
+        let pixel: [number, number, number, number] = [214, 196, 174, 255];
+
+        if (row >= 16 && row < 48 && column >= 16 && column < 48) {
+          pixel = [108, 88, 70, 255];
+        }
+
+        if (row >= 24 && row < 40 && column >= 24 && column < 40) {
+          pixel = [18, 18, 18, 255];
+        }
+
+        if (row >= 24 && row < 32 && column >= 24 && column < 32) {
+          pixel = [248, 248, 248, 255];
+        }
+
+        pixels.push(pixel);
+      }
+    }
+
+    const image = createRawImage(64, 64, pixels);
+    const result = generatePattern(image, {
+      targetSize: 16,
+      maxColors: 221,
+      smoothLevel: 0,
+    });
+    const eyeRows = [6, 7, 8, 9];
+    const eyeColumns = [6, 7, 8, 9];
+    const eyeCells = eyeRows.flatMap((row) => eyeColumns.map((column) => result.cells[row * result.width + column]));
+    const eyeLuminances = eyeCells.map((cell) => (cell.rgb[0] * 299 + cell.rgb[1] * 587 + cell.rgb[2] * 114) / 1000);
+
+    expect(Math.max(...eyeLuminances)).toBeGreaterThanOrEqual(175);
+    expect(Math.min(...eyeLuminances)).toBeLessThanOrEqual(65);
+  });
+
+  it('preserves a dark outline band between subject and light background instead of averaging it away', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+
+    for (let row = 0; row < 64; row += 1) {
+      for (let column = 0; column < 64; column += 1) {
+        let pixel: [number, number, number, number];
+
+        if (column < 29) {
+          pixel = [178, 132, 96, 255];
+        } else if (column < 35) {
+          pixel = [28, 24, 22, 255];
+        } else {
+          pixel = [238, 232, 214, 255];
+        }
+
+        pixels.push(pixel);
+      }
+    }
+
+    const image = createRawImage(64, 64, pixels);
+    const result = generatePattern(image, {
+      targetSize: 16,
+      maxColors: 221,
+      smoothLevel: 0,
+    });
+    const centerRow = 8;
+    const leftCell = result.cells[centerRow * result.width + 6];
+    const edgeLeftCell = result.cells[centerRow * result.width + 7];
+    const edgeRightCell = result.cells[centerRow * result.width + 8];
+    const rightCell = result.cells[centerRow * result.width + 9];
+    const leftLuminance = (leftCell.rgb[0] * 299 + leftCell.rgb[1] * 587 + leftCell.rgb[2] * 114) / 1000;
+    const edgeLuminance = Math.min(
+      (edgeLeftCell.rgb[0] * 299 + edgeLeftCell.rgb[1] * 587 + edgeLeftCell.rgb[2] * 114) / 1000,
+      (edgeRightCell.rgb[0] * 299 + edgeRightCell.rgb[1] * 587 + edgeRightCell.rgb[2] * 114) / 1000,
+    );
+    const rightLuminance = (rightCell.rgb[0] * 299 + rightCell.rgb[1] * 587 + rightCell.rgb[2] * 114) / 1000;
+
+    expect(leftLuminance - edgeLuminance).toBeGreaterThanOrEqual(35);
+    expect(rightLuminance - edgeLuminance).toBeGreaterThanOrEqual(95);
+  });
 });

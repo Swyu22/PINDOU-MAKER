@@ -68,3 +68,8 @@
 - [x] Make mobile preview denser so 48-column charts remain inspectable on phones.
 - [x] Expand subtle same-family warm gradients across more Mard palette steps.
 - [x] Re-run targeted regressions, full tests, and production build.
+### Update 2026-04-05 03:02
+- [x] Rework generator from color-only selection to outline-priority cell analysis.
+- [x] Preserve bright catchlights and dark boundary anchors with dedicated contrast-priority matching.
+- [x] Add contour regressions for eye highlights and subject/background edge bands.
+- [x] Re-run full tests and production build after the outline-priority change.

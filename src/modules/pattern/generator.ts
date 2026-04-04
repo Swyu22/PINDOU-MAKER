@@ -42,6 +42,20 @@ type SourceFamilyStats = {
   lightness: ComponentRange;
 };
 
+type AccentCandidate = {
+  profile: SourceColorProfile;
+  coverage: number;
+  contrast: number;
+};
+
+type CellAnalysis = {
+  base: SourceColorProfile;
+  brightAccent: AccentCandidate | null;
+  darkAccent: AccentCandidate | null;
+  variance: number;
+  contrastRange: number;
+};
+
 const PALETTE_WITH_LAB: PaletteEntryWithLab[] = MARD_221_PALETTE.map((entry) => ({
   ...entry,
   lab: rgbToLab(entry.rgb),
@@ -111,15 +125,18 @@ export function generatePattern(
   config: Pick<GeneratorConfig, 'targetSize' | 'maxColors' | 'smoothLevel'>,
 ): PatternDocument {
   const gridSize = resolvePatternGridSize(image.width, image.height, config.targetSize);
-  const representativeColors = sampleImageToGridAverages(image, gridSize.width, gridSize.height);
-  const representativeProfiles = representativeColors.map((rgb) => createSourceColorProfile(rgb));
+  const analyses = sampleImageToGridAnalyses(image, gridSize.width, gridSize.height);
+  const representativeProfiles = analyses.map((analysis) => analysis.base);
   const sourceFamilyStats = buildSourceFamilyStats(representativeProfiles);
-  const initialCells = representativeProfiles.map((profile) => findNearestPalette(profile, PALETTE_WITH_LAB, sourceFamilyStats));
-  const { cells: limitedCells, protectedCodes } = limitColors(
-    initialCells,
+  const selectedCells = selectOutlineAwareCells(analyses, gridSize.width, gridSize.height, sourceFamilyStats);
+  const protectedCodesFromAnchors = new Set(selectedCells.protectedIndices.map((index) => selectedCells.cells[index].code));
+  const { cells: limitedCells, protectedIndices } = limitColors(
+    selectedCells.cells,
     Math.min(PALETTE_WITH_LAB.length, Math.max(2, config.maxColors)),
+    protectedCodesFromAnchors,
+    selectedCells.protectedIndices,
   );
-  const smoothedCells = smoothCells(limitedCells, gridSize.width, gridSize.height, config.smoothLevel, protectedCodes);
+  const smoothedCells = smoothCells(limitedCells, gridSize.width, gridSize.height, config.smoothLevel, protectedIndices);
 
   return {
     width: gridSize.width,
@@ -138,7 +155,11 @@ export function sampleImageToGridAverages(
   gridWidth: number,
   gridHeight: number,
 ): Array<[number, number, number]> {
-  const cells: Array<[number, number, number]> = [];
+  return sampleImageToGridAnalyses(image, gridWidth, gridHeight).map((analysis) => analysis.base.rgb);
+}
+
+function sampleImageToGridAnalyses(image: RawImageDataLike, gridWidth: number, gridHeight: number): CellAnalysis[] {
+  const cells: CellAnalysis[] = [];
 
   for (let row = 0; row < gridHeight; row += 1) {
     const startY = Math.floor((row * image.height) / gridHeight);
@@ -148,37 +169,100 @@ export function sampleImageToGridAverages(
       const startX = Math.floor((column * image.width) / gridWidth);
       const endX =
         column === gridWidth - 1 ? image.width : Math.max(startX + 1, Math.floor(((column + 1) * image.width) / gridWidth));
+      const regionSamples: Array<{ rgb: [number, number, number]; luminance: number }> = [];
       let red = 0;
       let green = 0;
       let blue = 0;
       let totalWeight = 0;
+      let luminanceSum = 0;
+      let luminanceSquaredSum = 0;
+      let minLuminance = Number.POSITIVE_INFINITY;
+      let maxLuminance = Number.NEGATIVE_INFINITY;
 
       for (let sampleY = startY; sampleY < endY; sampleY += 1) {
         for (let sampleX = startX; sampleX < endX; sampleX += 1) {
           const sampleIndex = (sampleY * image.width + sampleX) * 4;
           const alpha = image.data[sampleIndex + 3];
-          const [sampleRed, sampleGreen, sampleBlue] = normalizeTransparentPixel(
+          const rgb = normalizeTransparentPixel(
             [image.data[sampleIndex], image.data[sampleIndex + 1], image.data[sampleIndex + 2]],
             alpha,
           );
+          const luminance = luminanceFromRgb(rgb);
           const weight = alpha < 16 ? 1 : Math.max(alpha / 255, 0.35);
 
-          red += srgbChannelToLinear(sampleRed) * weight;
-          green += srgbChannelToLinear(sampleGreen) * weight;
-          blue += srgbChannelToLinear(sampleBlue) * weight;
+          regionSamples.push({ rgb, luminance });
+          red += srgbChannelToLinear(rgb[0]) * weight;
+          green += srgbChannelToLinear(rgb[1]) * weight;
+          blue += srgbChannelToLinear(rgb[2]) * weight;
           totalWeight += weight;
+          luminanceSum += luminance;
+          luminanceSquaredSum += luminance * luminance;
+          minLuminance = Math.min(minLuminance, luminance);
+          maxLuminance = Math.max(maxLuminance, luminance);
         }
       }
 
-      cells.push([
+      const baseRgb: [number, number, number] = [
         linearChannelToSrgb(red / Math.max(1, totalWeight)),
         linearChannelToSrgb(green / Math.max(1, totalWeight)),
         linearChannelToSrgb(blue / Math.max(1, totalWeight)),
-      ]);
+      ];
+      const meanLuminance = luminanceSum / Math.max(1, regionSamples.length);
+      const variance = Math.max(0, luminanceSquaredSum / Math.max(1, regionSamples.length) - meanLuminance ** 2);
+      const deviation = Math.sqrt(variance);
+      const brightThreshold = meanLuminance + Math.max(26, deviation * 0.85);
+      const darkThreshold = meanLuminance - Math.max(24, deviation * 0.75);
+      const brightAccent = buildAccentCandidate(regionSamples, (sample) => sample.luminance >= brightThreshold, meanLuminance);
+      const darkAccent = buildAccentCandidate(regionSamples, (sample) => sample.luminance <= darkThreshold, meanLuminance);
+
+      cells.push({
+        base: createSourceColorProfile(baseRgb),
+        brightAccent,
+        darkAccent,
+        variance,
+        contrastRange: maxLuminance - minLuminance,
+      });
     }
   }
 
   return cells;
+}
+
+function buildAccentCandidate(
+  samples: Array<{ rgb: [number, number, number]; luminance: number }>,
+  predicate: (sample: { rgb: [number, number, number]; luminance: number }) => boolean,
+  meanLuminance: number,
+): AccentCandidate | null {
+  const matching = samples.filter(predicate);
+
+  if (matching.length === 0) {
+    return null;
+  }
+
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let luminanceSum = 0;
+
+  for (const sample of matching) {
+    red += srgbChannelToLinear(sample.rgb[0]);
+    green += srgbChannelToLinear(sample.rgb[1]);
+    blue += srgbChannelToLinear(sample.rgb[2]);
+    luminanceSum += sample.luminance;
+  }
+
+  const rgb: [number, number, number] = [
+    linearChannelToSrgb(red / matching.length),
+    linearChannelToSrgb(green / matching.length),
+    linearChannelToSrgb(blue / matching.length),
+  ];
+  const profile = createSourceColorProfile(rgb);
+
+  return {
+    profile,
+    coverage: matching.length / Math.max(1, samples.length),
+    contrast: Math.abs(luminanceSum / matching.length - meanLuminance),
+  };
 }
 
 function createSourceColorProfile(rgb: [number, number, number]): SourceColorProfile {
@@ -223,6 +307,154 @@ function buildSourceFamilyStats(profiles: SourceColorProfile[]) {
   return stats;
 }
 
+function selectOutlineAwareCells(
+  analyses: CellAnalysis[],
+  width: number,
+  height: number,
+  sourceFamilyStats: Map<string, SourceFamilyStats>,
+) {
+  const baseCells = analyses.map((analysis) =>
+    shouldBypassFamilyExpansion(analysis)
+      ? findNearestPalette(analysis.base, PALETTE_WITH_LAB)
+      : findNearestPalette(analysis.base, PALETTE_WITH_LAB, sourceFamilyStats),
+  );
+  const selectedCells = [...baseCells];
+  const protectedIndices: number[] = [];
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const analysis = analyses[index];
+      const baseEntry = baseCells[index];
+      const neighborLuminances = collectNeighborLuminances(baseCells, width, height, x, y);
+      const neighborRange =
+        neighborLuminances.length === 0
+          ? 0
+          : Math.max(...neighborLuminances) - Math.min(...neighborLuminances);
+
+      const brightEntry =
+        analysis.brightAccent === null ? null : findAnchorPalette(analysis.brightAccent.profile, 'bright');
+      const darkEntry =
+        analysis.darkAccent === null ? null : findAnchorPalette(analysis.darkAccent.profile, 'dark');
+      const chosenAccent = chooseAccentOverride(analysis, baseEntry, brightEntry, darkEntry, neighborRange);
+
+      if (chosenAccent !== null) {
+        selectedCells[index] = chosenAccent.entry;
+        protectedIndices.push(index);
+      }
+    }
+  }
+
+  return {
+    cells: selectedCells,
+    protectedIndices,
+  };
+}
+
+function shouldBypassFamilyExpansion(analysis: CellAnalysis) {
+  const strongestAccentCoverage = Math.max(analysis.brightAccent?.coverage ?? 0, analysis.darkAccent?.coverage ?? 0);
+
+  return (analysis.contrastRange >= 82 || analysis.variance >= 850) && strongestAccentCoverage >= 0.18;
+}
+
+function collectNeighborLuminances(cells: PaletteEntryWithLab[], width: number, height: number, x: number, y: number) {
+  const luminances: number[] = [];
+
+  for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+      if (offsetX === 0 && offsetY === 0) {
+        continue;
+      }
+
+      const neighborX = x + offsetX;
+      const neighborY = y + offsetY;
+
+      if (neighborX < 0 || neighborY < 0 || neighborX >= width || neighborY >= height) {
+        continue;
+      }
+
+      luminances.push(cells[neighborY * width + neighborX].luminance);
+    }
+  }
+
+  return luminances;
+}
+
+function chooseAccentOverride(
+  analysis: CellAnalysis,
+  baseEntry: PaletteEntryWithLab,
+  brightEntry: PaletteEntryWithLab | null,
+  darkEntry: PaletteEntryWithLab | null,
+  neighborRange: number,
+) {
+  const candidates: Array<{ entry: PaletteEntryWithLab; score: number }> = [];
+
+  if (analysis.brightAccent !== null && brightEntry !== null) {
+    const luminanceLift = brightEntry.luminance - baseEntry.luminance;
+
+    if (
+      analysis.brightAccent.coverage >= 0.08 &&
+      analysis.brightAccent.coverage <= 0.42 &&
+      analysis.brightAccent.contrast >= 52 &&
+      luminanceLift >= 70 &&
+      (analysis.contrastRange >= 95 || analysis.variance >= 1200) &&
+      (neighborRange >= 40 || baseEntry.luminance <= 75)
+    ) {
+      candidates.push({
+        entry: brightEntry,
+        score: luminanceLift + analysis.brightAccent.contrast * 0.9 - analysis.brightAccent.coverage * 24 + neighborRange * 0.2,
+      });
+    }
+  }
+
+  if (analysis.darkAccent !== null && darkEntry !== null) {
+    const luminanceDrop = baseEntry.luminance - darkEntry.luminance;
+
+    if (
+      analysis.darkAccent.coverage >= 0.08 &&
+      analysis.darkAccent.coverage <= 0.62 &&
+      analysis.darkAccent.contrast >= 32 &&
+      luminanceDrop >= 34 &&
+      (analysis.contrastRange >= 70 || analysis.variance >= 700) &&
+      neighborRange >= 55
+    ) {
+      candidates.push({
+        entry: darkEntry,
+        score: luminanceDrop + analysis.darkAccent.contrast * 0.7 - analysis.darkAccent.coverage * 18 + neighborRange * 0.35,
+      });
+    }
+  }
+
+  return candidates.sort((left, right) => right.score - left.score)[0] ?? null;
+}
+
+function findAnchorPalette(profile: SourceColorProfile, mode: 'bright' | 'dark') {
+  const constrainedPalette =
+    mode === 'bright'
+      ? PALETTE_WITH_LAB.filter((entry) => entry.luminance >= Math.max(175, profile.luminance - 25))
+      : PALETTE_WITH_LAB.filter((entry) => entry.luminance <= Math.min(90, profile.luminance + 35));
+  const palette = constrainedPalette.length >= 3 ? constrainedPalette : PALETTE_WITH_LAB;
+  let best = palette[0];
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const entry of palette) {
+    const luminanceDistance = Math.abs(profile.luminance - entry.luminance);
+    const labDistance = deltaLab(profile.lab, entry.lab);
+    const hueDistance = circularHueDistance(profile.hsl.h, entry.hsl.h) / 180;
+    const score =
+      mode === 'bright'
+        ? luminanceDistance * 1.2 + labDistance * 0.45 + hueDistance * 6
+        : luminanceDistance * 1.35 + labDistance * 0.38 + hueDistance * 3;
+
+    if (score < bestScore) {
+      bestScore = score;
+      best = entry;
+    }
+  }
+
+  return best;
+}
+
 export function replacePatternCell(pattern: PatternDocument, index: number, code: string): PatternDocument {
   const replacement = MARD_221_BY_CODE.get(code);
 
@@ -256,7 +488,12 @@ function resolvePatternGridSize(sourceWidth: number, sourceHeight: number, targe
   return fitWithinTarget(sourceWidth, sourceHeight, targetSize);
 }
 
-function limitColors(cells: PaletteEntryWithLab[], maxColors: number) {
+function limitColors(
+  cells: PaletteEntryWithLab[],
+  maxColors: number,
+  forcedProtectedCodes: Set<string>,
+  protectedIndices: number[],
+) {
   const counts = new Map<string, number>();
 
   for (const cell of cells) {
@@ -264,15 +501,15 @@ function limitColors(cells: PaletteEntryWithLab[], maxColors: number) {
   }
 
   if (counts.size <= maxColors) {
-    const protectedCodes = identifyProtectedAccentCodes(cells, counts);
+    const protectedCodes = new Set([...identifyProtectedAccentCodes(cells, counts), ...forcedProtectedCodes]);
 
     return {
       cells,
-      protectedCodes,
+      protectedIndices: new Set(protectedIndices),
     };
   }
 
-  const protectedCodes = identifyProtectedAccentCodes(cells, counts);
+  const protectedCodes = new Set([...identifyProtectedAccentCodes(cells, counts), ...forcedProtectedCodes]);
   const sceneAverageLuminance = averageLuminance(cells);
   const usage = [...counts.entries()]
     .map(([code, count]) => {
@@ -371,6 +608,9 @@ function limitColors(cells: PaletteEntryWithLab[], maxColors: number) {
 
   const limitedPalette = [...selected.values()];
   const retainedProtectedCodes = new Set([...protectedCodes].filter((code) => selected.has(code)));
+  const retainedProtectedIndices = new Set(
+    protectedIndices.filter((index) => retainedProtectedCodes.has(cells[index]?.code ?? '')),
+  );
 
   return {
     cells: cells.map((cell) =>
@@ -386,11 +626,11 @@ function limitColors(cells: PaletteEntryWithLab[], maxColors: number) {
             limitedPalette,
           ),
     ),
-    protectedCodes: retainedProtectedCodes,
+    protectedIndices: retainedProtectedIndices,
   };
 }
 
-function smoothCells(cells: PaletteEntryWithLab[], width: number, height: number, smoothLevel: number, protectedCodes: Set<string>) {
+function smoothCells(cells: PaletteEntryWithLab[], width: number, height: number, smoothLevel: number, protectedIndices: Set<number>) {
   if (smoothLevel <= 0) {
     return cells;
   }
@@ -436,12 +676,13 @@ function smoothCells(cells: PaletteEntryWithLab[], width: number, height: number
           continue;
         }
 
+        if (protectedIndices.has(index)) {
+          continue;
+        }
+
         const currentLuminance = luminanceFromRgb(current[index].rgb);
         const dominantLuminance = luminanceFromRgb(dominant.entry.rgb);
-        const isProtectedDarkAccent =
-          protectedCodes.has(current[index].code) &&
-          currentLuminance <= 75 &&
-          dominantLuminance - currentLuminance >= 42;
+        const isProtectedDarkAccent = currentLuminance <= 75 && dominantLuminance - currentLuminance >= 42 && currentSupport <= 1;
 
         if (isProtectedDarkAccent) {
           continue;

@@ -16,3 +16,5 @@
 - `plans/2026-04-04-pindou-generator-implementation.md`：拼豆图纸生成器实施计划
 - `plans/2026-04-05-grid-first-pattern-design.md`：按格取样 + 区域加权平均色重构设计
 - `plans/2026-04-05-grid-first-pattern-implementation.md`：按格取样重构、移动端预览与仓库迁移实施计划
+- `plans/2026-04-05-outline-priority-pattern-design.md`：轮廓优先、亮暗锚点保护设计
+- `plans/2026-04-05-outline-priority-pattern-implementation.md`：轮廓优先生成器实施计划
