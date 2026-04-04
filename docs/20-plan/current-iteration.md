@@ -54,3 +54,7 @@
 - [x] Diagnose GitHub Pages deploy failure from Actions log.
 - [x] Harden deploy workflow with configure-pages and explicit deploy permissions.
 - [ ] Repo owner to enable Pages -> GitHub Actions in repository settings and rerun deployment.
+### Update 2026-04-05 01:47
+- [x] Confirm remote HEAD still matches the latest pushed Pages build commit.
+- [x] Check DNS resolution for the Pages domain.
+- [ ] Direct HTTPS rendering verification still needs to be performed from a network that can reach github.io:443.
