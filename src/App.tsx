@@ -16,8 +16,8 @@ import type { GeneratorConfig, PatternDocument } from './modules/pattern/types';
 const sizeOptions: GeneratorConfig['targetSize'][] = [16, 24, 32];
 const defaultConfig: GeneratorConfig = {
   targetSize: 24,
-  maxColors: 12,
-  smoothLevel: 1,
+  maxColors: MARD_221_PALETTE.length,
+  smoothLevel: 0,
   previewMode: 'code',
 };
 
@@ -222,13 +222,15 @@ function App() {
             </label>
             <input
               id="max-colors"
-              max={18}
+              max={MARD_221_PALETTE.length}
               min={2}
               type="range"
               value={config.maxColors}
               onChange={(event) => handleConfigChange('maxColors', Number(event.target.value))}
             />
-            <span className="range-value">{config.maxColors} 色</span>
+            <span className="range-value">
+              {config.maxColors} / {MARD_221_PALETTE.length} 色
+            </span>
 
             <label className="input-label" htmlFor="smooth-level">
               平滑强度

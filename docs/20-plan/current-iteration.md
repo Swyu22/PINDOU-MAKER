@@ -58,3 +58,8 @@
 - [x] Confirm remote HEAD still matches the latest pushed Pages build commit.
 - [x] Check DNS resolution for the Pages domain.
 - [ ] Direct HTTPS rendering verification still needs to be performed from a network that can reach github.io:443.
+### Update 2026-04-05 02:00
+- [x] Improve palette matching to account for hue, saturation, and lightness instead of Lab only.
+- [x] Preserve color-bucket diversity when maxColors is lower than the full used palette.
+- [x] Raise default and maximum UI color budget to the full Mard 221 palette.
+- [x] Re-verify generator regressions, full test suite, and production build.

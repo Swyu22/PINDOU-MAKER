@@ -12,13 +12,23 @@ type LabColor = {
   b: number;
 };
 
+type HslColor = {
+  h: number;
+  s: number;
+  l: number;
+};
+
 type PaletteEntryWithLab = PaletteColor & {
   lab: LabColor;
+  hsl: HslColor;
+  luminance: number;
 };
 
 const PALETTE_WITH_LAB: PaletteEntryWithLab[] = MARD_221_PALETTE.map((entry) => ({
   ...entry,
   lab: rgbToLab(entry.rgb),
+  hsl: rgbToHsl(entry.rgb),
+  luminance: luminanceFromRgb(entry.rgb),
 }));
 
 const REGION_SAMPLE_SCALE = 12;
@@ -85,7 +95,10 @@ export function generatePattern(
   const gridSize = resolvePatternGridSize(image.width, image.height, config.targetSize);
   const representativeColors = sampleImageToGridAverages(image, gridSize.width, gridSize.height);
   const initialCells = representativeColors.map((rgb) => findNearestPalette(rgb, PALETTE_WITH_LAB));
-  const { cells: limitedCells, protectedCodes } = limitColors(initialCells, Math.max(2, config.maxColors));
+  const { cells: limitedCells, protectedCodes } = limitColors(
+    initialCells,
+    Math.min(PALETTE_WITH_LAB.length, Math.max(2, config.maxColors)),
+  );
   const smoothedCells = smoothCells(limitedCells, gridSize.width, gridSize.height, config.smoothLevel, protectedCodes);
 
   return {
@@ -130,17 +143,17 @@ export function sampleImageToGridAverages(
           );
           const weight = alpha < 16 ? 1 : Math.max(alpha / 255, 0.35);
 
-          red += sampleRed * weight;
-          green += sampleGreen * weight;
-          blue += sampleBlue * weight;
+          red += srgbChannelToLinear(sampleRed) * weight;
+          green += srgbChannelToLinear(sampleGreen) * weight;
+          blue += srgbChannelToLinear(sampleBlue) * weight;
           totalWeight += weight;
         }
       }
 
       cells.push([
-        Math.round(red / Math.max(1, totalWeight)),
-        Math.round(green / Math.max(1, totalWeight)),
-        Math.round(blue / Math.max(1, totalWeight)),
+        linearChannelToSrgb(red / Math.max(1, totalWeight)),
+        linearChannelToSrgb(green / Math.max(1, totalWeight)),
+        linearChannelToSrgb(blue / Math.max(1, totalWeight)),
       ]);
     }
   }
@@ -198,21 +211,108 @@ function limitColors(cells: PaletteEntryWithLab[], maxColors: number) {
   }
 
   const protectedCodes = identifyProtectedAccentCodes(cells, counts);
-  const protectedPalette = [...protectedCodes]
-    .map((code) => PALETTE_WITH_LAB.find((entry) => entry.code === code))
-    .filter((entry): entry is PaletteEntryWithLab => entry !== undefined)
-    .slice(0, maxColors);
-  const remainingPalette = [...counts.entries()]
-    .sort((left, right) => right[1] - left[1])
-    .map(([code]) => PALETTE_WITH_LAB.find((entry) => entry.code === code))
-    .filter((entry): entry is PaletteEntryWithLab => entry !== undefined)
-    .filter((entry) => !protectedCodes.has(entry.code))
-    .slice(0, Math.max(0, maxColors - protectedPalette.length));
-  const limitedPalette = [...protectedPalette, ...remainingPalette];
+  const sceneAverageLuminance = averageLuminance(cells);
+  const usage = [...counts.entries()]
+    .map(([code, count]) => {
+      const entry = PALETTE_WITH_LAB.find((candidate) => candidate.code === code);
+
+      if (entry === undefined) {
+        return null;
+      }
+
+      return {
+        code,
+        count,
+        entry,
+        bucket: createColorBucket(entry),
+        contrast: Math.abs(entry.luminance - sceneAverageLuminance),
+      };
+    })
+    .filter(
+      (
+        entry,
+      ): entry is { code: string; count: number; entry: PaletteEntryWithLab; bucket: string; contrast: number } => entry !== null,
+    );
+  const selected = new Map<string, PaletteEntryWithLab>();
+
+  for (const code of protectedCodes) {
+    const entry = PALETTE_WITH_LAB.find((candidate) => candidate.code === code);
+
+    if (entry !== undefined && selected.size < maxColors) {
+      selected.set(entry.code, entry);
+    }
+  }
+
+  const bucketRepresentatives = new Map<
+    string,
+    { code: string; count: number; entry: PaletteEntryWithLab; bucket: string; contrast: number }
+  >();
+
+  for (const item of usage) {
+    if (selected.has(item.code)) {
+      continue;
+    }
+
+    const current = bucketRepresentatives.get(item.bucket);
+
+    if (
+      current === undefined ||
+      item.count > current.count ||
+      (item.count === current.count && item.entry.hsl.s > current.entry.hsl.s) ||
+      (item.count === current.count && item.entry.hsl.s === current.entry.hsl.s && item.contrast > current.contrast)
+    ) {
+      bucketRepresentatives.set(item.bucket, item);
+    }
+  }
+
+  const bucketCandidates = [...bucketRepresentatives.values()].sort((left, right) => {
+    if (right.count !== left.count) {
+      return right.count - left.count;
+    }
+
+    if (right.entry.hsl.s !== left.entry.hsl.s) {
+      return right.entry.hsl.s - left.entry.hsl.s;
+    }
+
+    return right.contrast - left.contrast;
+  });
+
+  for (const candidate of bucketCandidates) {
+    if (selected.size >= maxColors) {
+      break;
+    }
+
+    selected.set(candidate.code, candidate.entry);
+  }
+
+  const remainingCandidates = usage
+    .filter((item) => !selected.has(item.code))
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+
+      if (right.entry.hsl.s !== left.entry.hsl.s) {
+        return right.entry.hsl.s - left.entry.hsl.s;
+      }
+
+      return right.contrast - left.contrast;
+    });
+
+  for (const candidate of remainingCandidates) {
+    if (selected.size >= maxColors) {
+      break;
+    }
+
+    selected.set(candidate.code, candidate.entry);
+  }
+
+  const limitedPalette = [...selected.values()];
+  const retainedProtectedCodes = new Set([...protectedCodes].filter((code) => selected.has(code)));
 
   return {
-    cells: cells.map((cell) => findNearestPalette(cell.rgb, limitedPalette)),
-    protectedCodes: new Set(protectedPalette.map((entry) => entry.code)),
+    cells: cells.map((cell) => (selected.has(cell.code) ? cell : findNearestPalette(cell.rgb, limitedPalette))),
+    protectedCodes: retainedProtectedCodes,
   };
 }
 
@@ -292,11 +392,14 @@ function smoothCells(cells: PaletteEntryWithLab[], width: number, height: number
 
 function findNearestPalette(rgb: [number, number, number], palette: PaletteEntryWithLab[]) {
   const targetLab = rgbToLab(rgb);
+  const targetHsl = rgbToHsl(rgb);
+  const targetLuminance = luminanceFromRgb(rgb);
+  const candidatePalette = narrowPaletteByHue(targetHsl, palette);
   let best = palette[0];
   let bestDistance = Number.POSITIVE_INFINITY;
 
-  for (const entry of palette) {
-    const distance = deltaLab(targetLab, entry.lab);
+  for (const entry of candidatePalette) {
+    const distance = paletteDistance(targetLab, targetHsl, targetLuminance, entry);
 
     if (distance < bestDistance) {
       bestDistance = distance;
@@ -309,6 +412,63 @@ function findNearestPalette(rgb: [number, number, number], palette: PaletteEntry
 
 function normalizeTransparentPixel(rgb: [number, number, number], alpha: number): [number, number, number] {
   return alpha >= 16 ? rgb : [255, 255, 255];
+}
+
+function paletteDistance(targetLab: LabColor, targetHsl: HslColor, targetLuminance: number, entry: PaletteEntryWithLab) {
+  const labDistance = deltaLab(targetLab, entry.lab);
+  const hueDistance = circularHueDistance(targetHsl.h, entry.hsl.h) / 180;
+  const saturationDistance = Math.abs(targetHsl.s - entry.hsl.s);
+  const lightnessDistance = Math.abs(targetHsl.l - entry.hsl.l);
+  const luminanceDistance = Math.abs(targetLuminance - entry.luminance) / 255;
+  const chromaWeight = Math.max(Math.min(targetHsl.s, entry.hsl.s), 0.08);
+  const huePenalty = targetHsl.s >= 0.18 && entry.hsl.s >= 0.18 ? hueDistance * (24 + chromaWeight * 28) : 0;
+
+  return labDistance * 0.7 + huePenalty + saturationDistance * 28 + lightnessDistance * 36 + luminanceDistance * 20;
+}
+
+function circularHueDistance(left: number, right: number) {
+  const distance = Math.abs(left - right);
+
+  return Math.min(distance, 360 - distance);
+}
+
+function narrowPaletteByHue(targetHsl: HslColor, palette: PaletteEntryWithLab[]) {
+  if (targetHsl.s < 0.1) {
+    const neutralPalette = palette.filter((entry) => entry.hsl.s < 0.18);
+
+    return neutralPalette.length >= 8 ? neutralPalette : palette;
+  }
+
+  const tightPalette = palette.filter(
+    (entry) => entry.hsl.s >= 0.08 && circularHueDistance(targetHsl.h, entry.hsl.h) <= 18,
+  );
+
+  if (tightPalette.length >= 4) {
+    return tightPalette;
+  }
+
+  const mediumPalette = palette.filter(
+    (entry) => entry.hsl.s >= 0.06 && circularHueDistance(targetHsl.h, entry.hsl.h) <= 32,
+  );
+
+  if (mediumPalette.length >= 4) {
+    return mediumPalette;
+  }
+
+  return palette;
+}
+
+function srgbChannelToLinear(channel: number) {
+  const normalized = channel / 255;
+
+  return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+}
+
+function linearChannelToSrgb(value: number) {
+  const normalized = Math.min(1, Math.max(0, value));
+  const srgb = normalized <= 0.0031308 ? normalized * 12.92 : 1.055 * normalized ** (1 / 2.4) - 0.055;
+
+  return Math.round(srgb * 255);
 }
 
 function rgbToLab([red, green, blue]: [number, number, number]): LabColor {
@@ -324,6 +484,45 @@ function rgbToLab([red, green, blue]: [number, number, number]): LabColor {
     l: 116 * normalizedY - 16,
     a: 500 * (normalizedX - normalizedY),
     b: 200 * (normalizedY - normalizedZ),
+  };
+}
+
+function rgbToHsl([red, green, blue]: [number, number, number]): HslColor {
+  const r = red / 255;
+  const g = green / 255;
+  const b = blue / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  const delta = max - min;
+
+  if (delta === 0) {
+    return {
+      h: 0,
+      s: 0,
+      l: lightness,
+    };
+  }
+
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue = 0;
+
+  switch (max) {
+    case r:
+      hue = (g - b) / delta + (g < b ? 6 : 0);
+      break;
+    case g:
+      hue = (b - r) / delta + 2;
+      break;
+    default:
+      hue = (r - g) / delta + 4;
+      break;
+  }
+
+  return {
+    h: hue * 60,
+    s: saturation,
+    l: lightness,
   };
 }
 
@@ -353,8 +552,7 @@ function deltaLab(left: LabColor, right: LabColor) {
 
 function identifyProtectedAccentCodes(cells: PaletteEntryWithLab[], counts: Map<string, number>) {
   const total = cells.length;
-  const weightedAverageLuminance =
-    cells.reduce((sum, cell) => sum + luminanceFromRgb(cell.rgb), 0) / Math.max(1, total);
+  const weightedAverageLuminance = averageLuminance(cells);
   const usage = [...counts.entries()]
     .map(([code, count]) => {
       const entry = PALETTE_WITH_LAB.find((candidate) => candidate.code === code);
@@ -385,6 +583,22 @@ function identifyProtectedAccentCodes(cells: PaletteEntryWithLab[], counts: Map<
     .slice(0, 2);
 
   return new Set(usage.map((entry) => entry.code));
+}
+
+function averageLuminance(cells: Array<{ rgb: [number, number, number] }>) {
+  return cells.reduce((sum, cell) => sum + luminanceFromRgb(cell.rgb), 0) / Math.max(1, cells.length);
+}
+
+function createColorBucket(entry: PaletteEntryWithLab) {
+  if (entry.hsl.s < 0.12) {
+    return `neutral-${Math.min(4, Math.floor(entry.hsl.l * 5))}`;
+  }
+
+  const hueBucket = Math.floor((((entry.hsl.h + 10) % 360) / 20));
+  const saturationBucket = Math.min(2, Math.floor(entry.hsl.s * 3));
+  const lightnessBucket = Math.min(4, Math.floor(entry.hsl.l * 5));
+
+  return `h${hueBucket}-s${saturationBucket}-l${lightnessBucket}`;
 }
 
 function luminanceFromRgb([red, green, blue]: [number, number, number]) {

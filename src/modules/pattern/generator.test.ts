@@ -14,6 +14,41 @@ function createRawImage(
   };
 }
 
+function rgbToHsl([red, green, blue]: [number, number, number]) {
+  const r = red / 255;
+  const g = green / 255;
+  const b = blue / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  const delta = max - min;
+
+  if (delta === 0) {
+    return { hue: 0, saturation: 0, lightness };
+  }
+
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue = 0;
+
+  switch (max) {
+    case r:
+      hue = (g - b) / delta + (g < b ? 6 : 0);
+      break;
+    case g:
+      hue = (b - r) / delta + 2;
+      break;
+    default:
+      hue = (r - g) / delta + 4;
+      break;
+  }
+
+  return {
+    hue: hue * 60,
+    saturation,
+    lightness,
+  };
+}
+
 describe('generatePattern', () => {
   it('averages each target region instead of inheriting a single dark source pixel', () => {
     const image = createRawImage(4, 2, [
@@ -201,5 +236,86 @@ describe('generatePattern', () => {
     expect(result.height).toBe(16);
     expect(usedCodes.size).toBeGreaterThanOrEqual(4);
     expect(midtoneCount).toBeGreaterThan(80);
+  });
+
+  it('preserves multiple red tones when the source contains warm hue, saturation, and lightness bands', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+
+    for (let row = 0; row < 24; row += 1) {
+      for (let column = 0; column < 24; column += 1) {
+        if (column < 6) {
+          pixels.push([117, 30, 36, 255]);
+          continue;
+        }
+
+        if (column < 12) {
+          pixels.push([176, 39, 52, 255]);
+          continue;
+        }
+
+        if (column < 18) {
+          pixels.push([214, 86, 94, 255]);
+          continue;
+        }
+
+        pixels.push([245, 160, 150, 255]);
+      }
+    }
+
+    const image = createRawImage(24, 24, pixels);
+    const result = generatePattern(image, {
+      targetSize: 24,
+      maxColors: 16,
+      smoothLevel: 0,
+    });
+    const warmCodes = new Set(
+      result.cells
+        .filter((cell) => {
+          const { hue, saturation, lightness } = rgbToHsl(cell.rgb);
+
+          return saturation >= 0.12 && lightness >= 0.15 && lightness <= 0.9 && (hue <= 32 || hue >= 330);
+        })
+        .map((cell) => cell.code),
+    );
+
+    expect(warmCodes.size).toBeGreaterThanOrEqual(3);
+  });
+
+  it('does not collapse all warm reds into a single palette code when colors are moderately limited', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+
+    for (let row = 0; row < 24; row += 1) {
+      for (let column = 0; column < 24; column += 1) {
+        if (row < 8) {
+          pixels.push(column < 12 ? [121, 25, 31, 255] : [170, 43, 51, 255]);
+          continue;
+        }
+
+        if (row < 16) {
+          pixels.push(column < 12 ? [202, 74, 76, 255] : [240, 122, 105, 255]);
+          continue;
+        }
+
+        pixels.push(column < 12 ? [206, 157, 143, 255] : [104, 121, 145, 255]);
+      }
+    }
+
+    const image = createRawImage(24, 24, pixels);
+    const result = generatePattern(image, {
+      targetSize: 24,
+      maxColors: 8,
+      smoothLevel: 0,
+    });
+    const warmCodes = new Set(
+      result.cells
+        .filter((cell) => {
+          const { hue, saturation } = rgbToHsl(cell.rgb);
+
+          return saturation >= 0.18 && (hue <= 28 || hue >= 340);
+        })
+        .map((cell) => cell.code),
+    );
+
+    expect(warmCodes.size).toBeGreaterThanOrEqual(2);
   });
 });
