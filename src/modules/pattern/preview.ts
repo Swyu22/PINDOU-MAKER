@@ -17,20 +17,22 @@ type PreviewCellSizeInput = {
 export function computePreviewCellSize({
   availableWidth,
   columns,
-  gap = 2,
+  gap,
   horizontalPadding = 12,
-  minCellSize = 8,
+  minCellSize,
   maxCellSize = 36,
 }: PreviewCellSizeInput) {
   if (columns <= 0) {
-    return minCellSize;
+    return minCellSize ?? 8;
   }
 
-  const usableWidth = Math.max(availableWidth - horizontalPadding * 2, minCellSize * columns);
-  const totalGapWidth = gap * Math.max(columns - 1, 0);
+  const resolvedGap = gap ?? (columns >= 40 ? 1 : 2);
+  const resolvedMinCellSize = minCellSize ?? (columns >= 40 ? 5 : columns >= 32 ? 6 : 8);
+  const usableWidth = Math.max(availableWidth - horizontalPadding * 2, resolvedMinCellSize * columns);
+  const totalGapWidth = resolvedGap * Math.max(columns - 1, 0);
   const nextCellSize = Math.floor((usableWidth - totalGapWidth) / columns);
 
-  return Math.min(Math.max(nextCellSize, minCellSize), maxCellSize);
+  return Math.min(Math.max(nextCellSize, resolvedMinCellSize), maxCellSize);
 }
 
 export function shouldRenderCellCode(previewMode: PreviewMode, cellSize: number) {

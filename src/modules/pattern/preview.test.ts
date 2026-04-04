@@ -9,7 +9,7 @@ describe('preview helpers', () => {
       columns: 32,
     });
 
-    expect(cellSize).toBeGreaterThanOrEqual(8);
+    expect(cellSize).toBeGreaterThanOrEqual(7);
     expect(cellSize).toBeLessThanOrEqual(10);
   });
 
@@ -27,5 +27,14 @@ describe('preview helpers', () => {
     expect(shouldRenderCellCode('code', 10)).toBe(false);
     expect(shouldRenderCellCode('code', 19)).toBe(true);
     expect(shouldRenderCellCode('color', 19)).toBe(false);
+  });
+
+  it('keeps a 48-column grid inside a phone-sized frame by using denser preview sizing', () => {
+    const cellSize = computePreviewCellSize({
+      availableWidth: 390,
+      columns: 48,
+    });
+
+    expect(cellSize).toBe(6);
   });
 });

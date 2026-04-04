@@ -6,7 +6,7 @@
 export type PreviewMode = 'color' | 'code';
 
 export type GeneratorConfig = {
-  targetSize: 16 | 24 | 32;
+  targetSize: 16 | 24 | 32 | 48;
   maxColors: number;
   smoothLevel: number;
   previewMode: PreviewMode;

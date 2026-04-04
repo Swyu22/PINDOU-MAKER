@@ -24,6 +24,24 @@ type PaletteEntryWithLab = PaletteColor & {
   luminance: number;
 };
 
+type SourceColorProfile = {
+  rgb: [number, number, number];
+  lab: LabColor;
+  hsl: HslColor;
+  luminance: number;
+  familyKey: string;
+};
+
+type ComponentRange = {
+  low: number;
+  high: number;
+};
+
+type SourceFamilyStats = {
+  saturation: ComponentRange;
+  lightness: ComponentRange;
+};
+
 const PALETTE_WITH_LAB: PaletteEntryWithLab[] = MARD_221_PALETTE.map((entry) => ({
   ...entry,
   lab: rgbToLab(entry.rgb),
@@ -94,7 +112,9 @@ export function generatePattern(
 ): PatternDocument {
   const gridSize = resolvePatternGridSize(image.width, image.height, config.targetSize);
   const representativeColors = sampleImageToGridAverages(image, gridSize.width, gridSize.height);
-  const initialCells = representativeColors.map((rgb) => findNearestPalette(rgb, PALETTE_WITH_LAB));
+  const representativeProfiles = representativeColors.map((rgb) => createSourceColorProfile(rgb));
+  const sourceFamilyStats = buildSourceFamilyStats(representativeProfiles);
+  const initialCells = representativeProfiles.map((profile) => findNearestPalette(profile, PALETTE_WITH_LAB, sourceFamilyStats));
   const { cells: limitedCells, protectedCodes } = limitColors(
     initialCells,
     Math.min(PALETTE_WITH_LAB.length, Math.max(2, config.maxColors)),
@@ -159,6 +179,48 @@ export function sampleImageToGridAverages(
   }
 
   return cells;
+}
+
+function createSourceColorProfile(rgb: [number, number, number]): SourceColorProfile {
+  const hsl = rgbToHsl(rgb);
+
+  return {
+    rgb,
+    lab: rgbToLab(rgb),
+    hsl,
+    luminance: luminanceFromRgb(rgb),
+    familyKey: createSourceFamilyKey(hsl),
+  };
+}
+
+function buildSourceFamilyStats(profiles: SourceColorProfile[]) {
+  const buckets = new Map<string, { saturations: number[]; lightnesses: number[] }>();
+
+  for (const profile of profiles) {
+    const bucket = buckets.get(profile.familyKey);
+
+    if (bucket === undefined) {
+      buckets.set(profile.familyKey, {
+        saturations: [profile.hsl.s],
+        lightnesses: [profile.hsl.l],
+      });
+      continue;
+    }
+
+    bucket.saturations.push(profile.hsl.s);
+    bucket.lightnesses.push(profile.hsl.l);
+  }
+
+  const stats = new Map<string, SourceFamilyStats>();
+
+  for (const [key, bucket] of buckets.entries()) {
+    stats.set(key, {
+      saturation: summarizeComponentRange(bucket.saturations, 0.04),
+      lightness: summarizeComponentRange(bucket.lightnesses, 0.06),
+    });
+  }
+
+  return stats;
 }
 
 export function replacePatternCell(pattern: PatternDocument, index: number, code: string): PatternDocument {
@@ -311,7 +373,19 @@ function limitColors(cells: PaletteEntryWithLab[], maxColors: number) {
   const retainedProtectedCodes = new Set([...protectedCodes].filter((code) => selected.has(code)));
 
   return {
-    cells: cells.map((cell) => (selected.has(cell.code) ? cell : findNearestPalette(cell.rgb, limitedPalette))),
+    cells: cells.map((cell) =>
+      selected.has(cell.code)
+        ? cell
+        : findNearestPalette(
+            {
+              rgb: cell.rgb,
+              lab: cell.lab,
+              hsl: cell.hsl,
+              luminance: cell.luminance,
+            },
+            limitedPalette,
+          ),
+    ),
     protectedCodes: retainedProtectedCodes,
   };
 }
@@ -390,16 +464,18 @@ function smoothCells(cells: PaletteEntryWithLab[], width: number, height: number
   return current;
 }
 
-function findNearestPalette(rgb: [number, number, number], palette: PaletteEntryWithLab[]) {
-  const targetLab = rgbToLab(rgb);
-  const targetHsl = rgbToHsl(rgb);
-  const targetLuminance = luminanceFromRgb(rgb);
-  const candidatePalette = narrowPaletteByHue(targetHsl, palette);
+function findNearestPalette(
+  profile: SourceColorProfile | { rgb: [number, number, number]; hsl: HslColor; lab: LabColor; luminance: number; familyKey?: string },
+  palette: PaletteEntryWithLab[],
+  sourceFamilyStats?: Map<string, SourceFamilyStats>,
+) {
+  const adaptedProfile = adaptSourceProfileToPalette(profile, palette, sourceFamilyStats);
+  const candidatePalette = narrowPaletteByHue(adaptedProfile.hsl, palette);
   let best = palette[0];
   let bestDistance = Number.POSITIVE_INFINITY;
 
   for (const entry of candidatePalette) {
-    const distance = paletteDistance(targetLab, targetHsl, targetLuminance, entry);
+    const distance = paletteDistance(adaptedProfile.lab, adaptedProfile.hsl, adaptedProfile.luminance, entry);
 
     if (distance < bestDistance) {
       bestDistance = distance;
@@ -456,6 +532,114 @@ function narrowPaletteByHue(targetHsl: HslColor, palette: PaletteEntryWithLab[])
   }
 
   return palette;
+}
+
+function adaptSourceProfileToPalette(
+  profile: { rgb: [number, number, number]; hsl: HslColor; lab: LabColor; luminance: number; familyKey?: string },
+  palette: PaletteEntryWithLab[],
+  sourceFamilyStats?: Map<string, SourceFamilyStats>,
+) {
+  if (profile.familyKey === undefined || sourceFamilyStats === undefined || profile.hsl.s < 0.12) {
+    return profile;
+  }
+
+  const familyStats = sourceFamilyStats.get(profile.familyKey);
+
+  if (familyStats === undefined) {
+    return profile;
+  }
+
+  const familyPalette = narrowPaletteByHue(profile.hsl, palette).filter((entry) => entry.hsl.s >= 0.08);
+
+  if (familyPalette.length < 4) {
+    return profile;
+  }
+
+  const paletteSaturation = summarizeComponentRange(
+    familyPalette.map((entry) => entry.hsl.s),
+    0.08,
+  );
+  const paletteLightness = summarizeComponentRange(
+    familyPalette.map((entry) => entry.hsl.l),
+    0.08,
+  );
+  const adaptedHsl = {
+    h: profile.hsl.h,
+    s: remapComponentIntoRange(profile.hsl.s, familyStats.saturation, paletteSaturation, 1.18),
+    l: remapComponentIntoRange(profile.hsl.l, familyStats.lightness, paletteLightness, 1.14),
+  };
+  const adaptedRgb = hslToRgb(adaptedHsl);
+
+  return {
+    ...profile,
+    rgb: adaptedRgb,
+    hsl: adaptedHsl,
+    lab: rgbToLab(adaptedRgb),
+    luminance: luminanceFromRgb(adaptedRgb),
+  };
+}
+
+function createSourceFamilyKey(hsl: HslColor) {
+  if (hsl.s < 0.12) {
+    return `neutral-${Math.min(4, Math.floor(hsl.l * 5))}`;
+  }
+
+  return `hue-${Math.floor(((hsl.h + 15) % 360) / 30)}`;
+}
+
+function summarizeComponentRange(values: number[], minimumSpan: number): ComponentRange {
+  if (values.length === 0) {
+    return {
+      low: 0,
+      high: 1,
+    };
+  }
+
+  const sorted = [...values].sort((left, right) => left - right);
+  const low = percentile(sorted, 0.1);
+  const high = percentile(sorted, 0.9);
+
+  if (high - low >= minimumSpan) {
+    return { low, high };
+  }
+
+  const center = percentile(sorted, 0.5);
+  const halfSpan = minimumSpan / 2;
+
+  return {
+    low: Math.max(0, center - halfSpan),
+    high: Math.min(1, center + halfSpan),
+  };
+}
+
+function percentile(sortedValues: number[], ratio: number) {
+  if (sortedValues.length === 1) {
+    return sortedValues[0];
+  }
+
+  const index = (sortedValues.length - 1) * ratio;
+  const lowerIndex = Math.floor(index);
+  const upperIndex = Math.ceil(index);
+  const weight = index - lowerIndex;
+
+  if (lowerIndex === upperIndex) {
+    return sortedValues[lowerIndex];
+  }
+
+  return sortedValues[lowerIndex] * (1 - weight) + sortedValues[upperIndex] * weight;
+}
+
+function remapComponentIntoRange(value: number, source: ComponentRange, target: ComponentRange, expansion: number) {
+  const sourceSpan = Math.max(source.high - source.low, 0.0001);
+  const targetSpan = Math.max(target.high - target.low, 0.0001);
+  const normalized = clamp01((value - source.low) / sourceSpan);
+  const expanded = clamp01(0.5 + (normalized - 0.5) * expansion);
+
+  return clamp01(target.low + expanded * targetSpan);
+}
+
+function clamp01(value: number) {
+  return Math.min(1, Math.max(0, value));
 }
 
 function srgbChannelToLinear(channel: number) {
@@ -524,6 +708,49 @@ function rgbToHsl([red, green, blue]: [number, number, number]): HslColor {
     s: saturation,
     l: lightness,
   };
+}
+
+function hslToRgb({ h, s, l }: HslColor): [number, number, number] {
+  if (s === 0) {
+    const value = Math.round(l * 255);
+
+    return [value, value, value];
+  }
+
+  const hueToChannel = (p: number, q: number, t: number) => {
+    let adjusted = t;
+
+    if (adjusted < 0) {
+      adjusted += 1;
+    }
+
+    if (adjusted > 1) {
+      adjusted -= 1;
+    }
+
+    if (adjusted < 1 / 6) {
+      return p + (q - p) * 6 * adjusted;
+    }
+
+    if (adjusted < 1 / 2) {
+      return q;
+    }
+
+    if (adjusted < 2 / 3) {
+      return p + (q - p) * (2 / 3 - adjusted) * 6;
+    }
+
+    return p;
+  };
+  const normalizedHue = h / 360;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+
+  return [
+    Math.round(hueToChannel(p, q, normalizedHue + 1 / 3) * 255),
+    Math.round(hueToChannel(p, q, normalizedHue) * 255),
+    Math.round(hueToChannel(p, q, normalizedHue - 1 / 3) * 255),
+  ];
 }
 
 function rgbToXyz(red: number, green: number, blue: number) {

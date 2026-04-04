@@ -63,3 +63,8 @@
 - [x] Preserve color-bucket diversity when maxColors is lower than the full used palette.
 - [x] Raise default and maximum UI color budget to the full Mard 221 palette.
 - [x] Re-verify generator regressions, full test suite, and production build.
+### Update 2026-04-05 02:14
+- [x] Add 48x48 as a selectable chart size.
+- [x] Make mobile preview denser so 48-column charts remain inspectable on phones.
+- [x] Expand subtle same-family warm gradients across more Mard palette steps.
+- [x] Re-run targeted regressions, full tests, and production build.

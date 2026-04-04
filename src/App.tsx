@@ -13,7 +13,7 @@ import {
 import { computePreviewCellSize, shouldRenderCellCode } from './modules/pattern/preview';
 import type { GeneratorConfig, PatternDocument } from './modules/pattern/types';
 
-const sizeOptions: GeneratorConfig['targetSize'][] = [16, 24, 32];
+const sizeOptions: GeneratorConfig['targetSize'][] = [16, 24, 32, 48];
 const defaultConfig: GeneratorConfig = {
   targetSize: 24,
   maxColors: MARD_221_PALETTE.length,

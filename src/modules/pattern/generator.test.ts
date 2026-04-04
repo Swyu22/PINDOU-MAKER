@@ -318,4 +318,64 @@ describe('generatePattern', () => {
 
     expect(warmCodes.size).toBeGreaterThanOrEqual(2);
   });
+
+  it('keeps four warm lightness bands separated when the full Mard palette is available', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+    const warmBands: Array<[number, number, number, number]> = [
+      [104, 22, 28, 255],
+      [152, 33, 45, 255],
+      [205, 75, 82, 255],
+      [241, 153, 145, 255],
+    ];
+
+    for (let row = 0; row < 8; row += 1) {
+      for (const band of warmBands) {
+        for (let column = 0; column < 8; column += 1) {
+          pixels.push(band);
+        }
+      }
+    }
+
+    const image = createRawImage(32, 8, pixels);
+    const result = generatePattern(image, {
+      targetSize: 32,
+      maxColors: 221,
+      smoothLevel: 0,
+    });
+    const sampleCodes = [3, 11, 19, 27].map((column) => result.cells[4 * result.width + column]);
+    const sampleLuminances = sampleCodes.map((cell) => (cell.rgb[0] * 299 + cell.rgb[1] * 587 + cell.rgb[2] * 114) / 1000);
+
+    expect(new Set(sampleCodes.map((cell) => cell.code)).size).toBe(4);
+    expect(sampleLuminances[0]).toBeLessThan(sampleLuminances[1]);
+    expect(sampleLuminances[1]).toBeLessThan(sampleLuminances[2]);
+    expect(sampleLuminances[2]).toBeLessThan(sampleLuminances[3]);
+  });
+
+  it('expands subtle warm gradients into at least three palette steps instead of collapsing them', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+    const warmBands: Array<[number, number, number, number]> = [
+      [134, 35, 42, 255],
+      [154, 48, 54, 255],
+      [176, 62, 67, 255],
+      [198, 78, 83, 255],
+    ];
+
+    for (let row = 0; row < 10; row += 1) {
+      for (const band of warmBands) {
+        for (let column = 0; column < 6; column += 1) {
+          pixels.push(band);
+        }
+      }
+    }
+
+    const image = createRawImage(24, 10, pixels);
+    const result = generatePattern(image, {
+      targetSize: 24,
+      maxColors: 221,
+      smoothLevel: 0,
+    });
+    const sampleCodes = [2, 8, 14, 20].map((column) => result.cells[5 * result.width + column].code);
+
+    expect(new Set(sampleCodes).size).toBeGreaterThanOrEqual(3);
+  });
 });

@@ -11,5 +11,6 @@ describe('App', () => {
     expect(screen.getByLabelText('目标尺寸')).toBeInTheDocument();
     expect(screen.getByLabelText('颜色上限')).toBeInTheDocument();
     expect(screen.getByLabelText('平滑强度')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /48/ })).toBeInTheDocument();
   });
 });
