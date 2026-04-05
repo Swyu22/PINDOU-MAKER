@@ -87,3 +87,13 @@
 - [x] Collapse multi-cell dark border runs back toward a single exterior contour.
 - [x] Re-run targeted generator regressions, full tests, and production build.
 - [ ] Re-check the updated style against real user images in browser preview.
+
+### Update 2026-04-05 15:17
+- [x] Write and register the illustration-first design and implementation plans.
+- [x] Add a real stylized-dog regression fixture and failing tests for budget blow-up and cool anti-aliasing noise.
+- [x] Rework the generator to auto-crop likely illustration margins before sampling.
+- [x] Add illustration-oriented mass cleanup and soft-budget compression before final smoothing.
+- [x] Retune the UI default first-pass color budget from 221 to 48 for stylized images.
+- [x] Re-run targeted generator regressions, full tests, and production build.
+- [x] Re-check the real dog image through local preview artifacts.
+- [ ] Continue improving 24-grid stylized portrait quality, especially interior mass shaping on light subjects.

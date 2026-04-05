@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { generatePattern, sampleImageToGridAverages } from './generator';
+import stylizedDogFixture from './fixtures/stylized-dog-sample.json';
 
 function createRawImage(
   width: number,
@@ -51,6 +52,58 @@ function rgbToHsl([red, green, blue]: [number, number, number]) {
 
 function rgbLuminance([red, green, blue]: [number, number, number]) {
   return (red * 299 + green * 587 + blue * 114) / 1000;
+}
+
+function createRawImageFromFixture(fixture: { width: number; height: number; data: number[] }) {
+  return {
+    width: fixture.width,
+    height: fixture.height,
+    data: new Uint8ClampedArray(fixture.data),
+  };
+}
+
+function findNonBackgroundBounds(
+  pattern: ReturnType<typeof generatePattern>,
+  backgroundLuminance = 230,
+) {
+  const bounds = {
+    minX: pattern.width,
+    minY: pattern.height,
+    maxX: -1,
+    maxY: -1,
+  };
+
+  for (let row = 0; row < pattern.height; row += 1) {
+    for (let column = 0; column < pattern.width; column += 1) {
+      const cell = pattern.cells[row * pattern.width + column];
+
+      if (rgbLuminance(cell.rgb) >= backgroundLuminance) {
+        continue;
+      }
+
+      bounds.minX = Math.min(bounds.minX, column);
+      bounds.minY = Math.min(bounds.minY, row);
+      bounds.maxX = Math.max(bounds.maxX, column);
+      bounds.maxY = Math.max(bounds.maxY, row);
+    }
+  }
+
+  return bounds;
+}
+
+function collectCellsWithinBounds(
+  pattern: ReturnType<typeof generatePattern>,
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+) {
+  const cells: typeof pattern.cells = [];
+
+  for (let row = bounds.minY; row <= bounds.maxY; row += 1) {
+    for (let column = bounds.minX; column <= bounds.maxX; column += 1) {
+      cells.push(pattern.cells[row * pattern.width + column]);
+    }
+  }
+
+  return cells;
 }
 
 describe('generatePattern', () => {
@@ -541,5 +594,36 @@ describe('generatePattern', () => {
         return hue <= 35 || hue >= 330;
       }),
     ).toBe(true);
+  });
+
+  it('does not exhaust a moderate color budget on the stylized dog sample', () => {
+    const image = createRawImageFromFixture(stylizedDogFixture);
+    const result = generatePattern(image, {
+      targetSize: 24,
+      maxColors: 48,
+      smoothLevel: 0,
+    });
+    const usedCodes = new Set(result.cells.map((cell) => cell.code));
+
+    expect(result.width).toBe(24);
+    expect(usedCodes.size).toBeLessThanOrEqual(32);
+  });
+
+  it('suppresses cool anti-aliasing noise inside the stylized dog face', () => {
+    const image = createRawImageFromFixture(stylizedDogFixture);
+    const result = generatePattern(image, {
+      targetSize: 24,
+      maxColors: 48,
+      smoothLevel: 0,
+    });
+    const bounds = findNonBackgroundBounds(result);
+    const faceCells = collectCellsWithinBounds(result, bounds);
+    const coolNoiseCells = faceCells.filter((cell) => {
+      const { hue, saturation, lightness } = rgbToHsl(cell.rgb);
+
+      return saturation >= 0.18 && lightness >= 0.2 && lightness <= 0.88 && hue >= 140 && hue <= 260;
+    }).length;
+
+    expect(coolNoiseCells).toBeLessThanOrEqual(28);
   });
 });

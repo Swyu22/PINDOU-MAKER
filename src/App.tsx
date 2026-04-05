@@ -16,7 +16,7 @@ import type { GeneratorConfig, PatternDocument } from './modules/pattern/types';
 const sizeOptions: GeneratorConfig['targetSize'][] = [16, 24, 32, 48];
 const defaultConfig: GeneratorConfig = {
   targetSize: 24,
-  maxColors: MARD_221_PALETTE.length,
+  maxColors: 48,
   smoothLevel: 0,
   previewMode: 'code',
 };
@@ -231,6 +231,8 @@ function App() {
             <span className="range-value">
               {config.maxColors} / {MARD_221_PALETTE.length} 色
             </span>
+
+            <p className="helper-text">风格化图片默认先用 48 色首稿生成，需要更细层次时再继续拉高到 221 色。</p>
 
             <label className="input-label" htmlFor="smooth-level">
               平滑强度

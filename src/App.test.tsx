@@ -13,4 +13,10 @@ describe('App', () => {
     expect(screen.getByLabelText('平滑强度')).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /48/ })).toBeInTheDocument();
   });
+
+  it('starts stylized-image generation with a moderate first-pass color budget', () => {
+    render(<App />);
+
+    expect(screen.getAllByRole('slider')[0]).toHaveValue('48');
+  });
 });

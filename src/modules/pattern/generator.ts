@@ -61,6 +61,8 @@ type LayerSelectionResult = {
   protectedIndices: number[];
 };
 
+type MassGroup = 'background' | 'neutral' | 'warm' | 'cool' | 'other' | 'dark';
+
 const PALETTE_WITH_LAB: PaletteEntryWithLab[] = MARD_221_PALETTE.map((entry) => ({
   ...entry,
   lab: rgbToLab(entry.rgb),
@@ -129,11 +131,12 @@ export function generatePattern(
   image: RawImageDataLike,
   config: Pick<GeneratorConfig, 'targetSize' | 'maxColors' | 'smoothLevel'>,
 ): PatternDocument {
-  const gridSize = resolvePatternGridSize(image.width, image.height, config.targetSize);
-  const analyses = sampleImageToGridAnalyses(image, gridSize.width, gridSize.height);
-  const representativeProfiles = analyses.map((analysis) => analysis.base);
+  const croppedImage = cropIllustrationSubject(image);
+  const gridSize = resolvePatternGridSize(croppedImage.width, croppedImage.height, config.targetSize);
+  const analyses = sampleImageToGridAnalyses(croppedImage, gridSize.width, gridSize.height);
+  const representativeProfiles = refineStylizedMassProfiles(analyses, gridSize.width, gridSize.height);
   const sourceFamilyStats = buildSourceFamilyStats(representativeProfiles);
-  const massCells = buildMassCells(analyses, sourceFamilyStats);
+  const massCells = buildMassCells(analyses, representativeProfiles, sourceFamilyStats, gridSize.width, gridSize.height);
   const contouredCells = applyThinContours(analyses, massCells, gridSize.width, gridSize.height);
   const anchoredCells = applyMicroAnchors(analyses, contouredCells.cells, massCells, gridSize.width, gridSize.height);
   const selectedCells = {
@@ -147,7 +150,42 @@ export function generatePattern(
     protectedCodesFromAnchors,
     selectedCells.protectedIndices,
   );
-  const smoothedCells = smoothCells(limitedCells, gridSize.width, gridSize.height, config.smoothLevel, protectedIndices);
+  const illustrationAdjustedCells = isIllustrationLikeScene(limitedCells, gridSize.width, gridSize.height)
+    ? suppressIllustrationCoolNoise(limitedCells, gridSize.width, gridSize.height, protectedIndices)
+    : limitedCells;
+  const softBudget = resolveIllustrationSoftBudget(config.maxColors, illustrationAdjustedCells, gridSize.width, gridSize.height);
+  const finalLimited =
+    softBudget < Math.min(PALETTE_WITH_LAB.length, Math.max(2, config.maxColors))
+      ? limitColors(
+          illustrationAdjustedCells,
+          softBudget,
+          protectedCodesFromAnchors,
+          [...protectedIndices],
+        )
+      : {
+          cells: illustrationAdjustedCells,
+          protectedIndices,
+        };
+  const finalIllustrationCells = isIllustrationLikeScene(finalLimited.cells, gridSize.width, gridSize.height)
+    ? stabilizeIllustrationMasses(
+        collapseIsolatedIllustrationCoolCells(
+          suppressIllustrationCoolNoise(finalLimited.cells, gridSize.width, gridSize.height, finalLimited.protectedIndices),
+          gridSize.width,
+          gridSize.height,
+          finalLimited.protectedIndices,
+        ),
+        gridSize.width,
+        gridSize.height,
+        finalLimited.protectedIndices,
+      )
+    : finalLimited.cells;
+  const smoothedCells = smoothCells(
+    finalIllustrationCells,
+    gridSize.width,
+    gridSize.height,
+    config.smoothLevel,
+    finalLimited.protectedIndices,
+  );
 
   return {
     width: gridSize.width,
@@ -167,6 +205,153 @@ export function sampleImageToGridAverages(
   gridHeight: number,
 ): Array<[number, number, number]> {
   return sampleImageToGridAnalyses(image, gridWidth, gridHeight).map((analysis) => analysis.base.rgb);
+}
+
+function cropIllustrationSubject(image: RawImageDataLike) {
+  const backgroundColor = estimateBackgroundColor(image);
+
+  if (backgroundColor === null) {
+    return image;
+  }
+
+  const bounds = findForegroundBounds(image, backgroundColor);
+
+  if (bounds === null) {
+    return image;
+  }
+
+  const widthRatio = bounds.width / Math.max(1, image.width);
+  const heightRatio = bounds.height / Math.max(1, image.height);
+
+  if (widthRatio >= 0.92 && heightRatio >= 0.92) {
+    return image;
+  }
+
+  return cropRawImage(image, bounds);
+}
+
+function estimateBackgroundColor(image: RawImageDataLike) {
+  const sampleRadiusX = Math.max(1, Math.min(12, Math.floor(image.width * 0.08)));
+  const sampleRadiusY = Math.max(1, Math.min(12, Math.floor(image.height * 0.08)));
+  const corners: Array<[number, number]> = [
+    [0, 0],
+    [Math.max(0, image.width - sampleRadiusX), 0],
+    [0, Math.max(0, image.height - sampleRadiusY)],
+    [Math.max(0, image.width - sampleRadiusX), Math.max(0, image.height - sampleRadiusY)],
+  ];
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let sampleCount = 0;
+
+  for (const [startX, startY] of corners) {
+    for (let y = startY; y < Math.min(image.height, startY + sampleRadiusY); y += 1) {
+      for (let x = startX; x < Math.min(image.width, startX + sampleRadiusX); x += 1) {
+        const index = (y * image.width + x) * 4;
+        const alpha = image.data[index + 3];
+        const rgb = normalizeTransparentPixel([image.data[index], image.data[index + 1], image.data[index + 2]], alpha);
+
+        red += rgb[0];
+        green += rgb[1];
+        blue += rgb[2];
+        sampleCount += 1;
+      }
+    }
+  }
+
+  if (sampleCount === 0) {
+    return null;
+  }
+
+  const average: [number, number, number] = [
+    Math.round(red / sampleCount),
+    Math.round(green / sampleCount),
+    Math.round(blue / sampleCount),
+  ];
+  const hsl = rgbToHsl(average);
+  const luminance = luminanceFromRgb(average);
+
+  if (luminance < 220 || hsl.s > 0.16) {
+    return null;
+  }
+
+  return average;
+}
+
+function findForegroundBounds(image: RawImageDataLike, background: [number, number, number]) {
+  let minX = image.width;
+  let minY = image.height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const index = (y * image.width + x) * 4;
+      const alpha = image.data[index + 3];
+      const rgb = normalizeTransparentPixel([image.data[index], image.data[index + 1], image.data[index + 2]], alpha);
+
+      if (!isForegroundPixel(rgb, background)) {
+        continue;
+      }
+
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    return null;
+  }
+
+  const paddingX = Math.max(2, Math.round(image.width * 0.03));
+  const paddingY = Math.max(2, Math.round(image.height * 0.03));
+
+  return {
+    minX: Math.max(0, minX - paddingX),
+    minY: Math.max(0, minY - paddingY),
+    width: Math.min(image.width - Math.max(0, minX - paddingX), maxX - minX + 1 + paddingX * 2),
+    height: Math.min(image.height - Math.max(0, minY - paddingY), maxY - minY + 1 + paddingY * 2),
+  };
+}
+
+function isForegroundPixel(rgb: [number, number, number], background: [number, number, number]) {
+  const backgroundLuminance = luminanceFromRgb(background);
+  const pixelLuminance = luminanceFromRgb(rgb);
+  const pixelHsl = rgbToHsl(rgb);
+  const distance = Math.sqrt(
+    (rgb[0] - background[0]) ** 2 +
+      (rgb[1] - background[1]) ** 2 +
+      (rgb[2] - background[2]) ** 2,
+  );
+
+  return distance >= 28 || pixelLuminance <= backgroundLuminance - 18 || pixelHsl.s >= 0.12;
+}
+
+function cropRawImage(
+  image: RawImageDataLike,
+  bounds: { minX: number; minY: number; width: number; height: number },
+): RawImageDataLike {
+  const data = new Uint8ClampedArray(bounds.width * bounds.height * 4);
+
+  for (let y = 0; y < bounds.height; y += 1) {
+    for (let x = 0; x < bounds.width; x += 1) {
+      const sourceIndex = ((bounds.minY + y) * image.width + (bounds.minX + x)) * 4;
+      const targetIndex = (y * bounds.width + x) * 4;
+
+      data[targetIndex] = image.data[sourceIndex];
+      data[targetIndex + 1] = image.data[sourceIndex + 1];
+      data[targetIndex + 2] = image.data[sourceIndex + 2];
+      data[targetIndex + 3] = image.data[sourceIndex + 3];
+    }
+  }
+
+  return {
+    width: bounds.width,
+    height: bounds.height,
+    data,
+  };
 }
 
 function sampleImageToGridAnalyses(image: RawImageDataLike, gridWidth: number, gridHeight: number): CellAnalysis[] {
@@ -318,8 +503,699 @@ function buildSourceFamilyStats(profiles: SourceColorProfile[]) {
   return stats;
 }
 
-function buildMassCells(analyses: CellAnalysis[], sourceFamilyStats: Map<string, SourceFamilyStats>) {
-  return analyses.map((analysis) => findNearestPalette(analysis.base, PALETTE_WITH_LAB, sourceFamilyStats));
+function refineStylizedMassProfiles(analyses: CellAnalysis[], width: number, height: number) {
+  const backgroundIndices = identifyBackgroundCells(analyses, width, height);
+  let current = analyses.map((analysis, index) =>
+    backgroundIndices.has(index) ? brightenBackgroundProfile(analysis.base) : analysis.base,
+  );
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const next = [...current];
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+
+        if (backgroundIndices.has(index)) {
+          next[index] = smoothBackgroundProfile(current, width, height, x, y, backgroundIndices);
+          continue;
+        }
+
+        const override = chooseStylizedMassOverride(current, analyses, width, height, x, y, backgroundIndices);
+
+        if (override !== null) {
+          next[index] = override;
+        }
+      }
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+function identifyBackgroundCells(analyses: CellAnalysis[], width: number, height: number) {
+  const background = new Set<number>();
+  const queue: number[] = [];
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (x !== 0 && y !== 0 && x !== width - 1 && y !== height - 1) {
+        continue;
+      }
+
+      const index = y * width + x;
+
+      if (!isBackgroundSeed(analyses[index])) {
+        continue;
+      }
+
+      background.add(index);
+      queue.push(index);
+    }
+  }
+
+  while (queue.length > 0) {
+    const index = queue.shift();
+
+    if (index === undefined) {
+      continue;
+    }
+
+    const x = index % width;
+    const y = Math.floor(index / width);
+
+    for (const neighborIndex of getCardinalNeighborIndices(width, height, x, y)) {
+      if (background.has(neighborIndex) || !isBackgroundContinuation(analyses[neighborIndex])) {
+        continue;
+      }
+
+      background.add(neighborIndex);
+      queue.push(neighborIndex);
+    }
+  }
+
+  return background;
+}
+
+function isBackgroundSeed(analysis: CellAnalysis) {
+  return (
+    analysis.base.luminance >= 228 &&
+    analysis.base.hsl.s <= 0.16 &&
+    analysis.contrastRange <= 52 &&
+    analysis.variance <= 180
+  );
+}
+
+function isBackgroundContinuation(analysis: CellAnalysis) {
+  return (
+    analysis.base.luminance >= 214 &&
+    analysis.base.hsl.s <= 0.2 &&
+    analysis.contrastRange <= 62 &&
+    analysis.variance <= 260
+  );
+}
+
+function brightenBackgroundProfile(profile: SourceColorProfile) {
+  const rgb: [number, number, number] = [
+    Math.round(profile.rgb[0] * 0.28 + 255 * 0.72),
+    Math.round(profile.rgb[1] * 0.28 + 255 * 0.72),
+    Math.round(profile.rgb[2] * 0.28 + 255 * 0.72),
+  ];
+
+  return createSourceColorProfile(rgb);
+}
+
+function smoothBackgroundProfile(
+  profiles: SourceColorProfile[],
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  backgroundIndices: Set<number>,
+) {
+  const index = y * width + x;
+  const backgroundNeighbors = getNeighborIndices(width, height, x, y)
+    .filter((neighborIndex) => backgroundIndices.has(neighborIndex))
+    .map((neighborIndex) => profiles[neighborIndex]);
+
+  if (backgroundNeighbors.length === 0) {
+    return brightenBackgroundProfile(profiles[index]);
+  }
+
+  return averageProfiles([...backgroundNeighbors, brightenBackgroundProfile(profiles[index])]);
+}
+
+function chooseStylizedMassOverride(
+  profiles: SourceColorProfile[],
+  analyses: CellAnalysis[],
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  backgroundIndices: Set<number>,
+) {
+  const index = y * width + x;
+  const profile = profiles[index];
+  const analysis = analyses[index];
+
+  if (profile.luminance <= 102 || analysis.contrastRange >= 88) {
+    return null;
+  }
+
+  const neighbors = getNeighborIndices(width, height, x, y)
+    .filter((neighborIndex) => !backgroundIndices.has(neighborIndex))
+    .map((neighborIndex) => profiles[neighborIndex]);
+
+  if (neighbors.length < 4) {
+    return null;
+  }
+
+  const currentGroup = classifyMassGroup(profile);
+  const sameGroupSupport = neighbors.filter((neighbor) => classifyMassGroup(neighbor) === currentGroup).length;
+  const dominantGroup = resolveDominantMassGroup(neighbors);
+
+  if (dominantGroup === null || dominantGroup === currentGroup) {
+    return null;
+  }
+
+  const candidateNeighbors = neighbors.filter((neighbor) => {
+    const group = classifyMassGroup(neighbor);
+
+    if (group !== dominantGroup) {
+      return false;
+    }
+
+    return dominantGroup === 'neutral' || Math.abs(neighbor.luminance - profile.luminance) <= 76;
+  });
+
+  if (candidateNeighbors.length < 4) {
+    return null;
+  }
+
+  const currentLooksLikeCoolNoise =
+    currentGroup === 'cool' &&
+    sameGroupSupport <= 2 &&
+    profile.luminance >= 118 &&
+    analysis.base.hsl.s >= 0.18 &&
+    analysis.contrastRange <= 76;
+  const currentLooksLikeIsolatedTint =
+    analysis.base.hsl.s >= 0.16 &&
+    sameGroupSupport <= 1 &&
+    analysis.variance <= 520 &&
+    analysis.contrastRange <= 82;
+
+  if (!currentLooksLikeCoolNoise && !currentLooksLikeIsolatedTint) {
+    return null;
+  }
+
+  return averageProfiles(candidateNeighbors);
+}
+
+function classifyMassGroup(profile: SourceColorProfile): MassGroup {
+  if (profile.luminance <= 86) {
+    return 'dark';
+  }
+
+  if (profile.luminance >= 232 && profile.hsl.s <= 0.16) {
+    return 'background';
+  }
+
+  if (profile.hsl.s < 0.12) {
+    return 'neutral';
+  }
+
+  if (profile.hsl.h <= 45 || profile.hsl.h >= 330) {
+    return 'warm';
+  }
+
+  if (profile.hsl.h >= 140 && profile.hsl.h <= 260) {
+    return 'cool';
+  }
+
+  return 'other';
+}
+
+function resolveDominantMassGroup(profiles: SourceColorProfile[]): MassGroup | null {
+  const counts = new Map<MassGroup, number>();
+
+  for (const profile of profiles) {
+    const group = classifyMassGroup(profile);
+
+    if (group === 'dark') {
+      continue;
+    }
+
+    counts.set(group, (counts.get(group) ?? 0) + 1);
+  }
+
+  const dominant = [...counts.entries()].sort((left, right) => right[1] - left[1])[0];
+
+  return dominant?.[0] ?? null;
+}
+
+function averageProfiles(profiles: SourceColorProfile[]) {
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+
+  for (const profile of profiles) {
+    red += srgbChannelToLinear(profile.rgb[0]);
+    green += srgbChannelToLinear(profile.rgb[1]);
+    blue += srgbChannelToLinear(profile.rgb[2]);
+  }
+
+  const count = Math.max(1, profiles.length);
+
+  return createSourceColorProfile([
+    linearChannelToSrgb(red / count),
+    linearChannelToSrgb(green / count),
+    linearChannelToSrgb(blue / count),
+  ]);
+}
+
+function buildMassCells(
+  analyses: CellAnalysis[],
+  representativeProfiles: SourceColorProfile[],
+  sourceFamilyStats: Map<string, SourceFamilyStats>,
+  width: number,
+  height: number,
+) {
+  const mappedCells = representativeProfiles.map((profile) => findNearestPalette(profile, PALETTE_WITH_LAB, sourceFamilyStats));
+
+  return compressSparseMassCells(mappedCells, representativeProfiles, analyses, width, height);
+}
+
+function compressSparseMassCells(
+  cells: PaletteEntryWithLab[],
+  profiles: SourceColorProfile[],
+  analyses: CellAnalysis[],
+  width: number,
+  height: number,
+) {
+  let current = [...cells];
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const counts = new Map<string, number>();
+
+    for (const cell of current) {
+      counts.set(cell.code, (counts.get(cell.code) ?? 0) + 1);
+    }
+
+    const next = [...current];
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const profile = profiles[index];
+        const analysis = analyses[index];
+        const currentCount = counts.get(current[index].code) ?? 0;
+
+        if (profile.luminance <= 112 || analysis.contrastRange >= 82) {
+          continue;
+        }
+
+        const currentGroup = classifyMassGroup(profile);
+        const sameGroupSupport = getNeighborIndices(width, height, x, y)
+          .map((neighborIndex) => profiles[neighborIndex])
+          .filter((neighborProfile) => classifyMassGroup(neighborProfile) === currentGroup).length;
+        const shouldCompress =
+          currentCount <= 2 ||
+          (currentGroup === 'cool' && sameGroupSupport <= 2) ||
+          (currentGroup === 'other' && sameGroupSupport <= 1);
+
+        if (!shouldCompress) {
+          continue;
+        }
+
+        const dominantNeighbor = [...getNeighborIndices(width, height, x, y)
+          .map((neighborIndex) => ({
+            group: classifyMassGroup(profiles[neighborIndex]),
+            entry: current[neighborIndex],
+          }))
+          .filter((neighbor) => neighbor.group !== 'dark')
+          .reduce((accumulator, neighbor) => {
+            const state = accumulator.get(neighbor.entry.code);
+
+            if (state === undefined) {
+              accumulator.set(neighbor.entry.code, { count: 1, entry: neighbor.entry, group: neighbor.group });
+            } else {
+              state.count += 1;
+            }
+
+            return accumulator;
+          }, new Map<string, { count: number; entry: PaletteEntryWithLab; group: MassGroup }>())
+          .values()]
+          .sort((left, right) => right.count - left.count)[0];
+
+        if (dominantNeighbor === undefined || dominantNeighbor.count < 3) {
+          continue;
+        }
+
+        if (currentGroup === 'cool' && dominantNeighbor.group === 'cool') {
+          continue;
+        }
+
+        next[index] = dominantNeighbor.entry;
+      }
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+function isIllustrationLikeScene(cells: PaletteEntryWithLab[], width: number, height: number) {
+  const background = identifyPaletteBackgroundCells(cells, width, height);
+  const backgroundRatio = background.size / Math.max(1, cells.length);
+
+  return backgroundRatio >= 0.2;
+}
+
+function identifyPaletteBackgroundCells(cells: PaletteEntryWithLab[], width: number, height: number) {
+  const background = new Set<number>();
+  const queue: number[] = [];
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (x !== 0 && y !== 0 && x !== width - 1 && y !== height - 1) {
+        continue;
+      }
+
+      const index = y * width + x;
+      const entry = cells[index];
+
+      if (!isPaletteBackgroundEntry(entry)) {
+        continue;
+      }
+
+      background.add(index);
+      queue.push(index);
+    }
+  }
+
+  while (queue.length > 0) {
+    const index = queue.shift();
+
+    if (index === undefined) {
+      continue;
+    }
+
+    const x = index % width;
+    const y = Math.floor(index / width);
+
+    for (const neighborIndex of getCardinalNeighborIndices(width, height, x, y)) {
+      if (background.has(neighborIndex) || !isPaletteBackgroundContinuation(cells[neighborIndex])) {
+        continue;
+      }
+
+      background.add(neighborIndex);
+      queue.push(neighborIndex);
+    }
+  }
+
+  return background;
+}
+
+function isPaletteBackgroundEntry(entry: PaletteEntryWithLab) {
+  return entry.luminance >= 228 && entry.hsl.s <= 0.14;
+}
+
+function isPaletteBackgroundContinuation(entry: PaletteEntryWithLab) {
+  return entry.luminance >= 214 && entry.hsl.s <= 0.18;
+}
+
+function suppressIllustrationCoolNoise(
+  cells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+  protectedIndices: Set<number>,
+) {
+  const background = identifyPaletteBackgroundCells(cells, width, height);
+  let current = [...cells];
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const next = [...current];
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const currentGroup = classifyPaletteMassGroup(current[index]);
+
+        if (
+          background.has(index) ||
+          current[index].luminance <= 112 ||
+          (protectedIndices.has(index) && currentGroup !== 'cool' && currentGroup !== 'other')
+        ) {
+          continue;
+        }
+
+        const neighborEntries = getNeighborIndices(width, height, x, y)
+          .filter((neighborIndex) => !background.has(neighborIndex))
+          .map((neighborIndex) => current[neighborIndex]);
+        const warmNeutralNeighbors = neighborEntries.filter((entry) => {
+          const group = classifyPaletteMassGroup(entry);
+
+          return group === 'warm' || group === 'neutral';
+        });
+        const adjacentDarkNeighbors = neighborEntries.filter((entry) => classifyPaletteMassGroup(entry) === 'dark').length;
+
+        if (neighborEntries.length < 4) {
+          continue;
+        }
+
+        const sameGroupSupport = neighborEntries.filter((entry) => classifyPaletteMassGroup(entry) === currentGroup).length;
+        const dominantWarmNeutral = [...warmNeutralNeighbors
+          .reduce((accumulator, entry) => {
+            const state = accumulator.get(entry.code);
+
+            if (state === undefined) {
+              accumulator.set(entry.code, { count: 1, entry });
+            } else {
+              state.count += 1;
+            }
+
+            return accumulator;
+          }, new Map<string, { count: number; entry: PaletteEntryWithLab }>())
+          .values()]
+          .sort((left, right) => right.count - left.count)[0];
+        const dominantNeighbor = [...neighborEntries
+          .reduce((accumulator, entry) => {
+            const group = classifyPaletteMassGroup(entry);
+
+            if (group === 'dark' || group === 'background') {
+              return accumulator;
+            }
+
+            const state = accumulator.get(entry.code);
+
+            if (state === undefined) {
+              accumulator.set(entry.code, { count: 1, entry, group });
+            } else {
+              state.count += 1;
+            }
+
+            return accumulator;
+          }, new Map<string, { count: number; entry: PaletteEntryWithLab; group: MassGroup }>())
+          .values()]
+          .sort((left, right) => right.count - left.count)[0];
+        const shouldReplace =
+          (currentGroup === 'cool' &&
+            current[index].luminance >= 124 &&
+            adjacentDarkNeighbors === 0 &&
+            (sameGroupSupport <= 3 || warmNeutralNeighbors.length >= 4)) ||
+          (currentGroup === 'other' && sameGroupSupport <= 1);
+
+        if (!shouldReplace || dominantNeighbor === undefined || dominantNeighbor.count < 2) {
+          continue;
+        }
+
+        if (
+          currentGroup === 'cool' &&
+          adjacentDarkNeighbors === 0 &&
+          warmNeutralNeighbors.length >= 4 &&
+          dominantWarmNeutral !== undefined &&
+          dominantWarmNeutral.count >= 1
+        ) {
+          next[index] = dominantWarmNeutral.entry;
+          continue;
+        }
+
+        if (dominantNeighbor.group === 'cool') {
+          continue;
+        }
+
+        next[index] = dominantNeighbor.entry;
+      }
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+function collapseIsolatedIllustrationCoolCells(
+  cells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+  protectedIndices: Set<number>,
+) {
+  const background = identifyPaletteBackgroundCells(cells, width, height);
+  let current = [...cells];
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const next = [...current];
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const currentGroup = classifyPaletteMassGroup(current[index]);
+
+        if (currentGroup !== 'cool' || background.has(index) || protectedIndices.has(index)) {
+          continue;
+        }
+
+        const neighborEntries = getNeighborIndices(width, height, x, y)
+          .filter((neighborIndex) => !background.has(neighborIndex))
+          .map((neighborIndex) => current[neighborIndex]);
+        const coolNeighbors = neighborEntries.filter((entry) => classifyPaletteMassGroup(entry) === 'cool').length;
+        const darkNeighbors = neighborEntries.filter((entry) => classifyPaletteMassGroup(entry) === 'dark').length;
+
+        if (coolNeighbors > 2 || darkNeighbors > 0) {
+          continue;
+        }
+
+        const dominantWarmNeutral = [...neighborEntries
+          .filter((entry) => {
+            const group = classifyPaletteMassGroup(entry);
+
+            return group === 'warm' || group === 'neutral';
+          })
+          .reduce((accumulator, entry) => {
+            const state = accumulator.get(entry.code);
+
+            if (state === undefined) {
+              accumulator.set(entry.code, { count: 1, entry });
+            } else {
+              state.count += 1;
+            }
+
+            return accumulator;
+          }, new Map<string, { count: number; entry: PaletteEntryWithLab }>())
+          .values()]
+          .sort((left, right) => right.count - left.count)[0];
+
+        if (dominantWarmNeutral === undefined || dominantWarmNeutral.count < 2) {
+          continue;
+        }
+
+        next[index] = dominantWarmNeutral.entry;
+      }
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+function stabilizeIllustrationMasses(
+  cells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+  protectedIndices: Set<number>,
+) {
+  const background = identifyPaletteBackgroundCells(cells, width, height);
+  let current = [...cells];
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const counts = new Map<string, number>();
+
+    for (const cell of current) {
+      counts.set(cell.code, (counts.get(cell.code) ?? 0) + 1);
+    }
+
+    const next = [...current];
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const entry = current[index];
+        const group = classifyPaletteMassGroup(entry);
+
+        if (protectedIndices.has(index) || background.has(index) || group === 'dark' || entry.luminance <= 96) {
+          continue;
+        }
+
+        const neighborCounts = new Map<string, { count: number; entry: PaletteEntryWithLab; group: MassGroup }>();
+
+        for (const neighborIndex of getNeighborIndices(width, height, x, y)) {
+          if (background.has(neighborIndex)) {
+            continue;
+          }
+
+          const neighbor = current[neighborIndex];
+          const neighborGroup = classifyPaletteMassGroup(neighbor);
+
+          if (neighborGroup === 'dark') {
+            continue;
+          }
+
+          const state = neighborCounts.get(neighbor.code);
+
+          if (state === undefined) {
+            neighborCounts.set(neighbor.code, {
+              count: 1,
+              entry: neighbor,
+              group: neighborGroup,
+            });
+          } else {
+            state.count += 1;
+          }
+        }
+
+        const dominant = [...neighborCounts.values()].sort((left, right) => right.count - left.count)[0];
+        const currentSupport = neighborCounts.get(entry.code)?.count ?? 0;
+
+        if (
+          dominant === undefined ||
+          dominant.entry.code === entry.code ||
+          dominant.count < 4 ||
+          Math.abs(dominant.entry.luminance - entry.luminance) > 92
+        ) {
+          continue;
+        }
+
+        const rareColor = (counts.get(entry.code) ?? 0) <= 2;
+        const noisyGroup = group === 'cool' || group === 'other';
+
+        if (!rareColor && !noisyGroup && dominant.count - currentSupport < 3) {
+          continue;
+        }
+
+        next[index] = dominant.entry;
+      }
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+function classifyPaletteMassGroup(entry: PaletteEntryWithLab): MassGroup {
+  if (entry.luminance <= 86) {
+    return 'dark';
+  }
+
+  if (entry.luminance >= 232 && entry.hsl.s <= 0.14) {
+    return 'background';
+  }
+
+  if (entry.hsl.s < 0.12) {
+    return 'neutral';
+  }
+
+  if (entry.hsl.h <= 45 || entry.hsl.h >= 330) {
+    return 'warm';
+  }
+
+  if (entry.hsl.h >= 140 && entry.hsl.h <= 260) {
+    return 'cool';
+  }
+
+  return 'other';
+}
+
+function resolveIllustrationSoftBudget(maxColors: number, cells: PaletteEntryWithLab[], width: number, height: number) {
+  if (maxColors > 64 || !isIllustrationLikeScene(cells, width, height)) {
+    return maxColors;
+  }
+
+  return Math.max(24, Math.min(maxColors, Math.round(maxColors * 0.67)));
 }
 
 function applyThinContours(
@@ -675,6 +1551,29 @@ function getCardinalNeighborIndices(width: number, height: number, x: number, y:
 
   if (y < height - 1) {
     indices.push((y + 1) * width + x);
+  }
+
+  return indices;
+}
+
+function getNeighborIndices(width: number, height: number, x: number, y: number) {
+  const indices: number[] = [];
+
+  for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+      if (offsetX === 0 && offsetY === 0) {
+        continue;
+      }
+
+      const neighborX = x + offsetX;
+      const neighborY = y + offsetY;
+
+      if (neighborX < 0 || neighborY < 0 || neighborX >= width || neighborY >= height) {
+        continue;
+      }
+
+      indices.push(neighborY * width + neighborX);
+    }
   }
 
   return indices;

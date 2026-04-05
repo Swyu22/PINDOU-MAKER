@@ -6,3 +6,4 @@ tmp/
 vite.config.js
 vite.config.d.ts
 *.baiduyun.uploading.cfg
+.tmp-dev-*.log

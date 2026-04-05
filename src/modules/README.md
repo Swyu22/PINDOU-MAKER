@@ -12,6 +12,7 @@
 - `pattern/types.ts`：图纸与配置类型
 - `pattern/generator.ts`：图片缩放、量化与平滑
 - `pattern/generator.test.ts`：量化和平滑回归测试
+- `pattern/fixtures/stylized-dog-sample.json`：用户提供的风格化狗头图片派生测试夹具
 - `pattern/preview.ts`：移动端预览缩放与格内色号规则
 - `pattern/preview.test.ts`：移动端预览尺寸回归测试
 - `pattern/history.ts`：撤销/重做状态

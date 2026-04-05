@@ -18,5 +18,6 @@
 - `plans/2026-04-05-grid-first-pattern-implementation.md`：按格取样重构、移动端预览与仓库迁移实施计划
 - `plans/2026-04-05-outline-priority-pattern-design.md`：轮廓优先、亮暗锚点保护设计
 - `plans/2026-04-05-outline-priority-pattern-implementation.md`：轮廓优先生成器实施计划
-
 - plans/2026-04-05-mass-first-thin-outline-pattern-implementation.md: mass-first thin-outline generator rework plan
+- `plans/2026-04-05-illustration-first-pattern-design.md`：插画优先生成链路设计
+- `plans/2026-04-05-illustration-first-pattern-implementation.md`：插画优先生成链路实施计划
