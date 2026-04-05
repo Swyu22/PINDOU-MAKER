@@ -73,3 +73,17 @@
 - [x] Preserve bright catchlights and dark boundary anchors with dedicated contrast-priority matching.
 - [x] Add contour regressions for eye highlights and subject/background edge bands.
 - [x] Re-run full tests and production build after the outline-priority change.
+
+### Update 2026-04-05 03:28
+- [x] Analyze user-provided bead-art references and extract the target rendering characteristics.
+- [x] Reject heavy contour-first generation as the current root style defect.
+- [x] Lock the next generator rework direction to mass-first rendering with thin contours and protected micro-anchors.
+- [x] Write docs/plans/2026-04-05-mass-first-thin-outline-pattern-implementation.md as the executable implementation plan.
+- [ ] Execute the new mass-first thin-outline rework and re-verify visual quality on representative images.
+
+### Update 2026-04-05 10:30
+- [x] Replace contour-priority selection with a mass-first base layer plus thin contour and micro-anchor overlays.
+- [x] Add regressions for thick silhouette rings and internal warm seams.
+- [x] Collapse multi-cell dark border runs back toward a single exterior contour.
+- [x] Re-run targeted generator regressions, full tests, and production build.
+- [ ] Re-check the updated style against real user images in browser preview.

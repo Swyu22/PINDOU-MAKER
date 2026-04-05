@@ -56,6 +56,11 @@ type CellAnalysis = {
   contrastRange: number;
 };
 
+type LayerSelectionResult = {
+  cells: PaletteEntryWithLab[];
+  protectedIndices: number[];
+};
+
 const PALETTE_WITH_LAB: PaletteEntryWithLab[] = MARD_221_PALETTE.map((entry) => ({
   ...entry,
   lab: rgbToLab(entry.rgb),
@@ -128,7 +133,13 @@ export function generatePattern(
   const analyses = sampleImageToGridAnalyses(image, gridSize.width, gridSize.height);
   const representativeProfiles = analyses.map((analysis) => analysis.base);
   const sourceFamilyStats = buildSourceFamilyStats(representativeProfiles);
-  const selectedCells = selectOutlineAwareCells(analyses, gridSize.width, gridSize.height, sourceFamilyStats);
+  const massCells = buildMassCells(analyses, sourceFamilyStats);
+  const contouredCells = applyThinContours(analyses, massCells, gridSize.width, gridSize.height);
+  const anchoredCells = applyMicroAnchors(analyses, contouredCells.cells, massCells, gridSize.width, gridSize.height);
+  const selectedCells = {
+    cells: anchoredCells.cells,
+    protectedIndices: [...new Set([...contouredCells.protectedIndices, ...anchoredCells.protectedIndices])],
+  };
   const protectedCodesFromAnchors = new Set(selectedCells.protectedIndices.map((index) => selectedCells.cells[index].code));
   const { cells: limitedCells, protectedIndices } = limitColors(
     selectedCells.cells,
@@ -307,43 +318,35 @@ function buildSourceFamilyStats(profiles: SourceColorProfile[]) {
   return stats;
 }
 
-function selectOutlineAwareCells(
+function buildMassCells(analyses: CellAnalysis[], sourceFamilyStats: Map<string, SourceFamilyStats>) {
+  return analyses.map((analysis) => findNearestPalette(analysis.base, PALETTE_WITH_LAB, sourceFamilyStats));
+}
+
+function applyThinContours(
   analyses: CellAnalysis[],
+  massCells: PaletteEntryWithLab[],
   width: number,
   height: number,
-  sourceFamilyStats: Map<string, SourceFamilyStats>,
-) {
-  const baseCells = analyses.map((analysis) =>
-    shouldBypassFamilyExpansion(analysis)
-      ? findNearestPalette(analysis.base, PALETTE_WITH_LAB)
-      : findNearestPalette(analysis.base, PALETTE_WITH_LAB, sourceFamilyStats),
-  );
-  const selectedCells = [...baseCells];
+): LayerSelectionResult {
+  const selectedCells = [...massCells];
   const protectedIndices: number[] = [];
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
-      const analysis = analyses[index];
-      const baseEntry = baseCells[index];
-      const neighborLuminances = collectNeighborLuminances(baseCells, width, height, x, y);
-      const neighborRange =
-        neighborLuminances.length === 0
-          ? 0
-          : Math.max(...neighborLuminances) - Math.min(...neighborLuminances);
+      const contourEntry = chooseThinContourOverride(analyses[index], massCells, width, height, x, y);
 
-      const brightEntry =
-        analysis.brightAccent === null ? null : findAnchorPalette(analysis.brightAccent.profile, 'bright');
-      const darkEntry =
-        analysis.darkAccent === null ? null : findAnchorPalette(analysis.darkAccent.profile, 'dark');
-      const chosenAccent = chooseAccentOverride(analysis, baseEntry, brightEntry, darkEntry, neighborRange);
-
-      if (chosenAccent !== null) {
-        selectedCells[index] = chosenAccent.entry;
-        protectedIndices.push(index);
+      if (contourEntry === null) {
+        continue;
       }
+
+      selectedCells[index] = contourEntry;
+      protectedIndices.push(index);
     }
   }
+
+  softenInteriorAdjacentToContours(selectedCells, protectedIndices, massCells, width, height);
+  collapseInteriorDarkComponentCells(selectedCells, massCells, width, height);
 
   return {
     cells: selectedCells,
@@ -351,10 +354,46 @@ function selectOutlineAwareCells(
   };
 }
 
-function shouldBypassFamilyExpansion(analysis: CellAnalysis) {
-  const strongestAccentCoverage = Math.max(analysis.brightAccent?.coverage ?? 0, analysis.darkAccent?.coverage ?? 0);
+function applyMicroAnchors(
+  analyses: CellAnalysis[],
+  layeredCells: PaletteEntryWithLab[],
+  massCells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+): LayerSelectionResult {
+  const selectedCells = [...layeredCells];
+  const protectedIndices = new Set<number>();
 
-  return (analysis.contrastRange >= 82 || analysis.variance >= 850) && strongestAccentCoverage >= 0.18;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const analysis = analyses[index];
+      const neighborLuminances = collectNeighborLuminances(selectedCells, width, height, x, y);
+      const neighborRange =
+        neighborLuminances.length === 0
+          ? 0
+          : Math.max(...neighborLuminances) - Math.min(...neighborLuminances);
+      const brightEntry = chooseBrightMicroAnchor(analysis, massCells[index], neighborRange);
+
+      if (brightEntry !== null) {
+        selectedCells[index] = brightEntry;
+        protectedIndices.add(index);
+        continue;
+      }
+
+      const darkEntry = chooseDarkMicroAnchor(analysis, massCells[index], neighborRange);
+
+      if (darkEntry !== null) {
+        selectedCells[index] = darkEntry;
+        protectedIndices.add(index);
+      }
+    }
+  }
+
+  return {
+    cells: selectedCells,
+    protectedIndices: [...protectedIndices],
+  };
 }
 
 function collectNeighborLuminances(cells: PaletteEntryWithLab[], width: number, height: number, x: number, y: number) {
@@ -380,52 +419,332 @@ function collectNeighborLuminances(cells: PaletteEntryWithLab[], width: number, 
   return luminances;
 }
 
-function chooseAccentOverride(
+function chooseThinContourOverride(
   analysis: CellAnalysis,
-  baseEntry: PaletteEntryWithLab,
-  brightEntry: PaletteEntryWithLab | null,
-  darkEntry: PaletteEntryWithLab | null,
+  massCells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+) {
+  const index = y * width + x;
+  const massEntry = massCells[index];
+  const contourSource =
+    analysis.darkAccent !== null && analysis.darkAccent.coverage >= 0.08 && analysis.darkAccent.contrast >= 24
+      ? analysis.darkAccent.profile
+      : analysis.base.luminance <= 96
+      ? analysis.base
+        : null;
+
+  if (contourSource === null) {
+    return null;
+  }
+
+  const brightBoundary = hasExteriorBrightNeighbor(massCells, width, height, x, y, contourSource.luminance);
+
+  if (!brightBoundary) {
+    return null;
+  }
+
+  const neighborLuminances = collectNeighborLuminances(massCells, width, height, x, y);
+  const neighborRange =
+    neighborLuminances.length === 0 ? 0 : Math.max(...neighborLuminances) - Math.min(...neighborLuminances);
+
+  if (analysis.contrastRange < 42 && neighborRange < 52) {
+    return null;
+  }
+
+  if (massEntry.luminance - contourSource.luminance < 18 && analysis.base.luminance > 110) {
+    return null;
+  }
+
+  return findContourPalette(contourSource, massEntry);
+}
+
+function softenInteriorAdjacentToContours(
+  cells: PaletteEntryWithLab[],
+  contourIndices: number[],
+  massCells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+) {
+  const contourSet = new Set(contourIndices);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+
+      if (contourSet.has(index) || cells[index].luminance > 95) {
+        continue;
+      }
+
+      const hasOwnExteriorBright = hasExteriorBrightNeighbor(massCells, width, height, x, y, cells[index].luminance);
+
+      if (hasOwnExteriorBright) {
+        continue;
+      }
+
+      const adjacentExteriorDarkNeighbor = getCardinalNeighborIndices(width, height, x, y).some((neighborIndex) => {
+        const neighborX = neighborIndex % width;
+        const neighborY = Math.floor(neighborIndex / width);
+        const neighbor = cells[neighborIndex];
+
+        return (
+          neighbor.luminance <= cells[index].luminance + 15 &&
+          (contourSet.has(neighborIndex) || hasExteriorBrightNeighbor(massCells, width, height, neighborX, neighborY, neighbor.luminance))
+        );
+      });
+
+      if (!adjacentExteriorDarkNeighbor) {
+        continue;
+      }
+
+      const brighterInteriorNeighbor = getCardinalNeighborIndices(width, height, x, y)
+        .map((neighborIndex) => ({ index: neighborIndex, entry: massCells[neighborIndex] }))
+        .filter(({ entry }) => entry.luminance - cells[index].luminance >= 55)
+        .filter(({ index, entry }) => !isBorderConnectedBrightRegion(massCells, width, height, index, cells[index].luminance + 55))
+        .sort((left, right) => right.entry.luminance - left.entry.luminance)[0];
+
+      if (brighterInteriorNeighbor === undefined) {
+        continue;
+      }
+
+      cells[index] = brighterInteriorNeighbor.entry;
+    }
+  }
+}
+
+function collapseInteriorDarkComponentCells(
+  cells: PaletteEntryWithLab[],
+  massCells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+) {
+  const visited = new Set<number>();
+
+  for (let index = 0; index < cells.length; index += 1) {
+    if (visited.has(index) || cells[index].luminance > 90) {
+      continue;
+    }
+
+    const component: number[] = [];
+    const queue = [index];
+
+    while (queue.length > 0) {
+      const currentIndex = queue.shift();
+
+      if (currentIndex === undefined || visited.has(currentIndex) || cells[currentIndex].luminance > 90) {
+        continue;
+      }
+
+      visited.add(currentIndex);
+      component.push(currentIndex);
+
+      const x = currentIndex % width;
+      const y = Math.floor(currentIndex / width);
+      queue.push(...getCardinalNeighborIndices(width, height, x, y));
+    }
+
+    if (component.length <= 1) {
+      continue;
+    }
+
+    const componentMinDistance = Math.min(
+      ...component.map((currentIndex) => {
+        const x = currentIndex % width;
+        const y = Math.floor(currentIndex / width);
+
+        return distanceToImageBorder(width, height, x, y);
+      }),
+    );
+
+    for (const currentIndex of component) {
+      const x = currentIndex % width;
+      const y = Math.floor(currentIndex / width);
+
+      if (distanceToImageBorder(width, height, x, y) <= componentMinDistance) {
+        continue;
+      }
+
+      const brighterInteriorNeighbor = getCardinalNeighborIndices(width, height, x, y)
+        .map((neighborIndex) => ({ index: neighborIndex, entry: massCells[neighborIndex] }))
+        .filter(({ entry }) => entry.luminance - cells[currentIndex].luminance >= 55)
+        .sort((left, right) => right.entry.luminance - left.entry.luminance)[0];
+
+      if (brighterInteriorNeighbor !== undefined) {
+        cells[currentIndex] = brighterInteriorNeighbor.entry;
+      }
+    }
+  }
+}
+
+function chooseBrightMicroAnchor(
+  analysis: CellAnalysis,
+  massEntry: PaletteEntryWithLab,
   neighborRange: number,
 ) {
-  const candidates: Array<{ entry: PaletteEntryWithLab; score: number }> = [];
+  if (analysis.brightAccent === null) {
+    return null;
+  }
 
-  if (analysis.brightAccent !== null && brightEntry !== null) {
-    const luminanceLift = brightEntry.luminance - baseEntry.luminance;
+  const accent = analysis.brightAccent;
+  const brightEntry = findAnchorPalette(accent.profile, 'bright');
+  const luminanceLift = brightEntry.luminance - massEntry.luminance;
 
-    if (
-      analysis.brightAccent.coverage >= 0.08 &&
-      analysis.brightAccent.coverage <= 0.42 &&
-      analysis.brightAccent.contrast >= 52 &&
-      luminanceLift >= 70 &&
-      (analysis.contrastRange >= 95 || analysis.variance >= 1200) &&
-      (neighborRange >= 40 || baseEntry.luminance <= 75)
-    ) {
-      candidates.push({
-        entry: brightEntry,
-        score: luminanceLift + analysis.brightAccent.contrast * 0.9 - analysis.brightAccent.coverage * 24 + neighborRange * 0.2,
-      });
+  if (
+    accent.coverage >= 0.06 &&
+    accent.coverage <= 0.24 &&
+    accent.contrast >= 44 &&
+    luminanceLift >= 62 &&
+    (analysis.contrastRange >= 90 || analysis.variance >= 900) &&
+    (neighborRange >= 36 || massEntry.luminance <= 90)
+  ) {
+    return brightEntry;
+  }
+
+  return null;
+}
+
+function chooseDarkMicroAnchor(
+  analysis: CellAnalysis,
+  massEntry: PaletteEntryWithLab,
+  neighborRange: number,
+) {
+  if (analysis.darkAccent === null) {
+    return null;
+  }
+
+  const accent = analysis.darkAccent;
+  const darkEntry = findAnchorPalette(accent.profile, 'dark');
+  const luminanceDrop = massEntry.luminance - darkEntry.luminance;
+
+  if (
+    accent.coverage >= 0.05 &&
+    accent.coverage <= 0.22 &&
+    accent.contrast >= 48 &&
+    luminanceDrop >= 54 &&
+    massEntry.luminance >= 110 &&
+    (analysis.contrastRange >= 88 || analysis.variance >= 840) &&
+    neighborRange >= 32
+  ) {
+    return darkEntry;
+  }
+
+  return null;
+}
+
+function hasExteriorBrightNeighbor(
+  cells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  sourceLuminance: number,
+) {
+  const threshold = sourceLuminance + 40;
+  const neighborIndices = getCardinalNeighborIndices(width, height, x, y);
+
+  for (const neighborIndex of neighborIndices) {
+
+    if (cells[neighborIndex].luminance < threshold) {
+      continue;
+    }
+
+    if (isBorderConnectedBrightRegion(cells, width, height, neighborIndex, threshold)) {
+      return true;
     }
   }
 
-  if (analysis.darkAccent !== null && darkEntry !== null) {
-    const luminanceDrop = baseEntry.luminance - darkEntry.luminance;
+  return false;
+}
 
-    if (
-      analysis.darkAccent.coverage >= 0.08 &&
-      analysis.darkAccent.coverage <= 0.62 &&
-      analysis.darkAccent.contrast >= 32 &&
-      luminanceDrop >= 34 &&
-      (analysis.contrastRange >= 70 || analysis.variance >= 700) &&
-      neighborRange >= 55
-    ) {
-      candidates.push({
-        entry: darkEntry,
-        score: luminanceDrop + analysis.darkAccent.contrast * 0.7 - analysis.darkAccent.coverage * 18 + neighborRange * 0.35,
-      });
+function getCardinalNeighborIndices(width: number, height: number, x: number, y: number) {
+  const indices: number[] = [];
+
+  if (x > 0) {
+    indices.push(y * width + (x - 1));
+  }
+
+  if (x < width - 1) {
+    indices.push(y * width + (x + 1));
+  }
+
+  if (y > 0) {
+    indices.push((y - 1) * width + x);
+  }
+
+  if (y < height - 1) {
+    indices.push((y + 1) * width + x);
+  }
+
+  return indices;
+}
+
+function distanceToImageBorder(width: number, height: number, x: number, y: number) {
+  return Math.min(x, y, width - 1 - x, height - 1 - y);
+}
+
+function isBorderConnectedBrightRegion(
+  cells: PaletteEntryWithLab[],
+  width: number,
+  height: number,
+  startIndex: number,
+  threshold: number,
+) {
+  const visited = new Set<number>();
+  const queue = [startIndex];
+
+  while (queue.length > 0) {
+    const index = queue.shift();
+
+    if (index === undefined || visited.has(index)) {
+      continue;
+    }
+
+    visited.add(index);
+
+    if (cells[index].luminance < threshold) {
+      continue;
+    }
+
+    const x = index % width;
+    const y = Math.floor(index / width);
+
+    if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
+      return true;
+    }
+
+    queue.push(index - 1, index + 1, index - width, index + width);
+  }
+
+  return false;
+}
+
+function findContourPalette(profile: SourceColorProfile, massEntry: PaletteEntryWithLab) {
+  const maximumContourLuminance = Math.max(24, massEntry.luminance - 18);
+  const darkCandidates = narrowPaletteByHue(massEntry.hsl, PALETTE_WITH_LAB).filter(
+    (entry) => entry.luminance <= maximumContourLuminance,
+  );
+  const fallbackPalette = PALETTE_WITH_LAB.filter((entry) => entry.luminance <= maximumContourLuminance);
+  const palette = darkCandidates.length >= 2 ? darkCandidates : fallbackPalette.length > 0 ? fallbackPalette : [findAnchorPalette(profile, 'dark')];
+  const targetLuminance = Math.max(24, Math.min(profile.luminance + 10, massEntry.luminance - 28));
+  let best = palette[0];
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const entry of palette) {
+    const luminanceDistance = Math.abs(entry.luminance - targetLuminance);
+    const hueDistance = circularHueDistance(massEntry.hsl.h, entry.hsl.h) / 180;
+    const saturationDistance = Math.abs(massEntry.hsl.s - entry.hsl.s);
+    const labDistance = deltaLab(profile.lab, entry.lab);
+    const score = luminanceDistance * 1.5 + hueDistance * 16 + saturationDistance * 18 + labDistance * 0.32;
+
+    if (score < bestScore) {
+      bestScore = score;
+      best = entry;
     }
   }
 
-  return candidates.sort((left, right) => right.score - left.score)[0] ?? null;
+  return best;
 }
 
 function findAnchorPalette(profile: SourceColorProfile, mode: 'bright' | 'dark') {

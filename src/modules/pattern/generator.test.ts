@@ -49,6 +49,10 @@ function rgbToHsl([red, green, blue]: [number, number, number]) {
   };
 }
 
+function rgbLuminance([red, green, blue]: [number, number, number]) {
+  return (red * 299 + green * 587 + blue * 114) / 1000;
+}
+
 describe('generatePattern', () => {
   it('averages each target region instead of inheriting a single dark source pixel', () => {
     const image = createRawImage(4, 2, [
@@ -456,5 +460,86 @@ describe('generatePattern', () => {
 
     expect(leftLuminance - edgeLuminance).toBeGreaterThanOrEqual(35);
     expect(rightLuminance - edgeLuminance).toBeGreaterThanOrEqual(95);
+  });
+
+  it('compresses a thick dark silhouette ring into a thin contour instead of keeping a two-cell black border', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+
+    for (let row = 0; row < 64; row += 1) {
+      for (let column = 0; column < 64; column += 1) {
+        let pixel: [number, number, number, number] = [248, 244, 232, 255];
+
+        if (row >= 8 && row < 56 && column >= 8 && column < 56) {
+          pixel = [34, 28, 24, 255];
+        }
+
+        if (row >= 16 && row < 48 && column >= 16 && column < 48) {
+          pixel = [198, 122, 56, 255];
+        }
+
+        pixels.push(pixel);
+      }
+    }
+
+    const image = createRawImage(64, 64, pixels);
+    const result = generatePattern(image, {
+      targetSize: 16,
+      maxColors: 221,
+      smoothLevel: 0,
+    });
+    const centerRow = 8;
+    const outerLeft = result.cells[centerRow * result.width + 2];
+    const innerLeft = result.cells[centerRow * result.width + 3];
+    const innerRight = result.cells[centerRow * result.width + 12];
+    const outerRight = result.cells[centerRow * result.width + 13];
+    const outerLeftLuminance = rgbLuminance(outerLeft.rgb);
+    const innerLeftLuminance = rgbLuminance(innerLeft.rgb);
+    const innerRightLuminance = rgbLuminance(innerRight.rgb);
+    const outerRightLuminance = rgbLuminance(outerRight.rgb);
+
+    expect(innerLeftLuminance - outerLeftLuminance).toBeGreaterThanOrEqual(40);
+    expect(innerRightLuminance - outerRightLuminance).toBeGreaterThanOrEqual(40);
+    expect(innerLeftLuminance).toBeGreaterThanOrEqual(85);
+    expect(innerRightLuminance).toBeGreaterThanOrEqual(85);
+  });
+
+  it('keeps an internal warm seam in the warm family instead of promoting it to a black outline', () => {
+    const pixels: Array<[number, number, number, number]> = [];
+
+    for (let row = 0; row < 64; row += 1) {
+      for (let column = 0; column < 64; column += 1) {
+        let pixel: [number, number, number, number];
+
+        if (column < 30) {
+          pixel = [196, 118, 52, 255];
+        } else if (column < 34) {
+          pixel = [78, 42, 18, 255];
+        } else {
+          pixel = [246, 226, 194, 255];
+        }
+
+        pixels.push(pixel);
+      }
+    }
+
+    const image = createRawImage(64, 64, pixels);
+    const result = generatePattern(image, {
+      targetSize: 16,
+      maxColors: 221,
+      smoothLevel: 0,
+    });
+    const centerRow = 8;
+    const seamCells = [7, 8].map((column) => result.cells[centerRow * result.width + column]);
+    const seamLuminances = seamCells.map((cell) => rgbLuminance(cell.rgb));
+    const seamHues = seamCells.map((cell) => rgbToHsl(cell.rgb).hue);
+    const seamSaturations = seamCells.map((cell) => rgbToHsl(cell.rgb).saturation);
+
+    expect(Math.min(...seamLuminances)).toBeGreaterThanOrEqual(42);
+    expect(seamSaturations.every((saturation) => saturation >= 0.18)).toBe(true);
+    expect(
+      seamHues.every((hue) => {
+        return hue <= 35 || hue >= 330;
+      }),
+    ).toBe(true);
   });
 });
